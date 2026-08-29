@@ -1,0 +1,7 @@
+{
+  "recommendations": [
+    "esbenp.prettier-vscode",
+    "ms-vscode.live-server",
+    "supabase.postgrestools"
+  ]
+}

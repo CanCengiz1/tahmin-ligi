@@ -1,0 +1,20 @@
+# gercek anahtarlar
+app/config.js
+.env
+.env.local
+
+# bagimliliklar / cikti
+node_modules/
+dist/
+build/
+
+# editor ve isletim sistemi
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# supabase yerel gelistirme
+supabase/.branches/
+supabase/.temp/
