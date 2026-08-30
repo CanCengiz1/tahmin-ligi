@@ -234,8 +234,10 @@ async function updatePassword() {
   const { error } = await supabase.auth.updateUser({ password:p1 });
   S.authBusy = false;
   if (error) { S.authMsg = authErrorMessage(error); render(); return; }
+  await supabase.auth.signOut();
+  S.user = null; S.me = null; S.profile = null; S.admin = false;
   S.authMode = "login";
-  S.authMsg = "Şifren güncellendi.";
+  S.authMsg = "Şifren güncellendi. Yeni şifrenle giriş yap.";
   render();
 }
 
@@ -488,7 +490,7 @@ function render() {
   theme();
   const app = document.getElementById("app");
   if (S.loading) { app.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--dim)">Yükleniyor…</div>'; return; }
-  if (!S.user || !S.me) { app.innerHTML = authScreen(); return; }
+  if (S.authMode === "reset" || !S.user || !S.me) { app.innerHTML = authScreen(); return; }
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
   let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><button class="out" onclick="signOut()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + ' · Çıkış</button></header><nav>';
