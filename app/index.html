@@ -170,7 +170,9 @@ if (typeof CONFIG === "undefined") {
 
 <div id="app"></div>
 
-<script>
+<script type="module">
+import { empty, tally, standings, confirmedAt } from "./scoring.js";
+
 /* ---------------- Fikstür ---------------- */
 const TEAMS = {
   gs: {
@@ -207,7 +209,6 @@ const TEAMS = {
 const NEUTRAL = {bg:"#0B0D10",panel:"#14181E",line:"#252C36",accent:"#C8D2E0",text:"#EDF1F6",dim:"#7D8794"};
 const ART = '<svg class="shake" viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Iki kisi el ele tutusuyor"><defs><pattern id="gsp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#A90432"/><rect width="8" height="18" fill="#F5A800"/></pattern><pattern id="fbp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#12356E"/><rect width="8" height="18" fill="#FFE500"/></pattern></defs><circle cx="100" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 79,44 A 21,21 0 0 1 121,44 Z" fill="#2A2117"/><rect x="92" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 68,90 L 56,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 132,90 L 145,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="74" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="79" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="106" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="59" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="124" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="72" y="66" width="56" height="66" rx="12" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><circle cx="200" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 179,44 A 21,21 0 0 1 221,44 Z" fill="#2A2117"/><rect x="192" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 232,90 L 244,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 168,90 L 155,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="174" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="179" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="206" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="159" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="224" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="172" y="66" width="56" height="66" rx="12" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><circle cx="150" cy="115" r="12" fill="#F3EBDA" stroke="#0B0D10" stroke-width="3"/></svg>';
 const PICKS = [{v:3,t:"Galibiyet"},{v:1,t:"Beraberlik"},{v:0,t:"Mağlubiyet"}];
-const empty = () => [null,null,null,null,null,null,null,null];
 
 /* ---------------- Durum ---------------- */
 const S = {
@@ -276,46 +277,10 @@ async function push(key, data) {
 }
 
 /* ---------------- Puanlama ---------------- */
-function tally(picks, actual) {
-  let predicted=0, hits=0, earned=0;
-  (picks||empty()).forEach((p,i) => {
-    if (p !== null) predicted += p;
-    if (actual[i] !== null && p !== null && p === actual[i]) { hits++; earned += actual[i]; }
-  });
-  return {predicted, hits, earned};
-}
-function standings(scope) {
-  scope = (scope === "gs" || scope === "fb") ? scope : "gs";
-  const keys = [scope];
-  const at = keys.reduce((sum,k) => sum + S.results[k].reduce((a,b)=>a+(b||0),0), 0);
-  const rows = S.players.map(p => {
-    const t = keys.map(k => tally(p[k], S.results[k]));
-    const g = tally(p.gs, S.results.gs), f = tally(p.fb, S.results.fb);
-    return Object.assign({}, p, {g, f,
-      total: t.reduce((a,x)=>a+x.predicted,0),
-      hits:  t.reduce((a,x)=>a+x.hits,0)});
-  });
-  const played = keys.reduce((n,k) => n + S.results[k].filter(x=>x!==null).length, 0);
-  const total  = 8;
-  const finished = played === total;
-  const revealed = keys.every(k => locked(k));
-  const ct = p => Math.max(confirmedAt(p,"gs")||0, confirmedAt(p,"fb")||0) || p.updatedAt || 0;
-  rows.sort((a,b) => {
-    // sezon boyunca: en cok maci bilen ustte
-    // butun maclar bitince: toplam puana en yakin tahmin kazanir
-    if (finished) {
-      const da = Math.abs(a.total-at), db = Math.abs(b.total-at);
-      if (da !== db) return da-db;
-    }
-    if (a.hits !== b.hits) return b.hits-a.hits;   // esitlikte: mac bazinda daha cok bilen
-    return ct(a)-ct(b);              // o da esitse: tahminini once kesinlestiren
-  });
-  return {rows, at, played, total, finished, revealed, scope};
-}
+/* tally, standings, confirmedAt: app/scoring.js içinde, testleri orada. */
 const LOCK_LEAD = 60 * 60 * 1000;                       // ilk maçtan 1 saat önce
 const lockAt = k => new Date(TEAMS[k].lock).getTime() - LOCK_LEAD;
 const locked = k => Date.now() >= lockAt(k);
-const confirmedAt = (p, k) => (p && p.conf && p.conf[k]) || null;
 
 /* ---------------- Eylemler ---------------- */
 function normName(n){ return String(n||"").trim().replace(/\s+/g," "); }
@@ -603,7 +568,7 @@ function teamView(k) {
 }
 
 function boardView() {
-  const st = standings(S.scope);
+  const st = standings(S.players, S.results, S.scope, {revealed: locked(S.scope)});
   let html = '<div class="pad">';
   html += '<div class="scope">';
   [["gs","Galatasaray"],["fb","Fenerbahçe"]].forEach(o => {
@@ -776,6 +741,15 @@ function render() {
   html += '</div>';
   app.innerHTML = html;
 }
+
+/* ---------------- Global erişim ---------------- */
+/* type="module" içindeki üst düzey bildirimler window'a eklenmez;
+   inline onclick="..." öznitelikleri bu isimlere ihtiyaç duyuyor. */
+Object.assign(window, {
+  S, render, go, stepName, stepBack, stepPin, signOut, pick, confirmTeam, editTeam,
+  saveScore, clearAllScores, clearAll, clearScore, setPt, openRow, closeRow,
+  setScope, peek, toggleEdit, refresh
+});
 
 /* ---------------- Başlangıç ---------------- */
 (async function init(){

@@ -23,10 +23,10 @@ depoda değil.
 
 Ön yüzü taşımadan önce kuralları güvenceye al.
 
-- [ ] `tally`, `standings`, eşitlik bozma kurallarını `scoring.js` dosyasına çıkar
-- [ ] Vitest ile test yaz: eşit toplam farklı isabet, hataların birbirini
+- [x] `tally`, `standings`, eşitlik bozma kurallarını `scoring.js` dosyasına çıkar
+- [x] Vitest ile test yaz: eşit toplam farklı isabet, hataların birbirini
       götürmesi, yarım sezon, tek katılımcı, hiç sonuç yok
-- [ ] `index.html` bu dosyayı içe aktarsın
+- [x] `index.html` bu dosyayı içe aktarsın
 
 **Neden önce bu:** puanlama kuralları en çok tartıştığımız yer. Testler
 olmadan taşıma sırasında sessizce bozulur.
