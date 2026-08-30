@@ -9,8 +9,10 @@ tahmini yapan kazanır.
 
 ## Şu anki durum
 
-`app/index.html` tek dosya: HTML + CSS + vanilla JS, derleme adımı yok.
-Veri Supabase PostgREST'e `fetch` ile gidiyor. Ayrıntı için `ARCHITECTURE.md`.
+`app/index.html` (HTML + CSS + vanilla JS) ve `app/scoring.js` (saf puanlama
+fonksiyonları, ES module olarak `index.html`'e import ediliyor). Derleme
+adımı yok. Veri Supabase PostgREST'e `fetch` ile gidiyor. Ayrıntı için
+`ARCHITECTURE.md`.
 
 Hedef, çok ligli açık sürüm. Sıra ve kapsam `ROADMAP.md` içinde.
 
@@ -22,8 +24,10 @@ Hedef, çok ligli açık sürüm. Sıra ve kapsam `ROADMAP.md` içinde.
   bağlayıcıdır.
 - `app/config.js` okunmaz, yazılmaz, commit edilmez.
 - Migrasyon dosyaları geriye dönük düzenlenmez, yeni numara eklenir.
-- Değişiklikten sonra sözdizimini doğrula:
-  `node -e "..."` ile script bloklarını `new Function` içine sokup çalıştır.
+- `app/scoring.js`'i değiştirdikten sonra `npm test` (Vitest) çalıştır.
+- `index.html`'in ana script bloğu `type="module"`; sözdizimi doğrulaması
+  için `node --check` kullan (`new Function` ile sarma artık `import`
+  bildirimini parse edemez).
 - Tasarım koyu tema üzerine kurulu, takım renkleri kimliği taşıyor
   (GS #F5A800/#A90432, FB #FFE500/#12356E). Yeni ekran eklerken bu dile uy.
 

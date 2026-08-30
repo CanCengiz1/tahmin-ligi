@@ -171,7 +171,7 @@ if (typeof CONFIG === "undefined") {
 <div id="app"></div>
 
 <script type="module">
-import { empty, tally, standings, confirmedAt } from "./scoring.js";
+import { empty, standings, confirmedAt } from "./scoring.js";
 
 /* ---------------- Fikstür ---------------- */
 const TEAMS = {
@@ -611,19 +611,22 @@ function boardView() {
         '</button>';
       if (open) {
         html += '<div class="detail">';
-        if (mine || st.revealed) {
-          ["gs","fb"].forEach(k => {
-            html += '<div style="padding-top:12px"><div class="lbl">' + TEAMS[k].short + '</div><div class="strip8">';
+        ["gs","fb"].forEach(k => {
+          const teamRevealed = mine || locked(k);   // her takım kendi kilidine göre; scope'tan bağımsız
+          html += '<div style="padding-top:12px"><div class="lbl">' + TEAMS[k].short + '</div>';
+          if (teamRevealed) {
+            html += '<div class="strip8">';
             (p[k]||empty()).forEach((v,j) => {
               const a = S.results[k][j];
               const hit = a !== null && v !== null && a === v;
               html += '<div style="' + (hit ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : (v===null?'color:var(--dim)':'')) + '">' + (v===null?'·':v) + '</div>';
             });
-            html += '</div></div>';
-          });
-        } else {
-          html += '<p class="meta" style="padding-top:12px">Tahminler ilk maçlar başlayınca herkese açılır.</p>';
-        }
+            html += '</div>';
+          } else {
+            html += '<p class="meta" style="margin:2px 0 0">Tahminler kilitten sonra açılır.</p>';
+          }
+          html += '</div>';
+        });
         html += '</div>';
       }
       html += '</div>';
