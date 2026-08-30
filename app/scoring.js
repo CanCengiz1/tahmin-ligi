@@ -24,6 +24,17 @@ export function confirmedAt(p, k) {
 }
 
 /*
+ * Bir oyuncunun satırı açıldığında hangi takımların tahminleri gösterilsin?
+ * Kural her takım için ayrı: kendi satırınsa (mine) ya da o takım kilitliyse
+ * (isLocked(k) === true) gösterilir. Tek bir "revealed" bayrağıyla ikisini
+ * birden açıp kapatmak, biri kilitliyken diğeri açıkken sızıntıya yol açar.
+ */
+export function revealedTeams(mine, isLocked, teamKeys) {
+  teamKeys = teamKeys || ["gs", "fb"];
+  return teamKeys.filter(k => !!mine || !!isLocked(k));
+}
+
+/*
  * players: [{ id, name, gs[8], fb[8], conf:{gs,fb}, updatedAt }, ...]
  * results: { gs[8], fb[8] } — her eleman puan (3/1/0) ya da henüz girilmediyse null
  * scope:   "gs" | "fb" — geçersizse "gs" varsayılır

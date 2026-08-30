@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { empty, tally, confirmedAt, standings, MATCH_COUNT } from "./scoring.js";
+import { empty, tally, confirmedAt, standings, revealedTeams, MATCH_COUNT } from "./scoring.js";
 
 const win = (...vals) => vals; // 3/1/0 dizisini okunaklı kurmak için
 
@@ -203,5 +203,32 @@ describe("standings", () => {
     expect(standings(players, results, "gs", { revealed: true }).revealed).toBe(true);
     expect(standings(players, results, "gs", { revealed: false }).revealed).toBe(false);
     expect(standings(players, results, "gs").revealed).toBe(false);
+  });
+});
+
+describe("revealedTeams", () => {
+  it("karışık kilit penceresi: GS kilitli, FB değilken başkasının satırında FB gösterilmez", () => {
+    // GS'nin ilk maçı FB'ninkinden önce, aradaki saatlerde GS kilitli olur ama
+    // FB henüz açık kalır — tam da sızıntının yaşandığı pencere.
+    const isLocked = k => k === "gs";
+    const shown = revealedTeams(/* mine */ false, isLocked);
+    expect(shown).toContain("gs");
+    expect(shown).not.toContain("fb");
+  });
+
+  it("kendi satırında (mine) her iki takım da kilit durumundan bağımsız gösterilir", () => {
+    const isLocked = () => false; // hiçbir takım kilitli değil
+    const shown = revealedTeams(/* mine */ true, isLocked);
+    expect(shown).toEqual(["gs", "fb"]);
+  });
+
+  it("hiçbir takım kilitli değilken ve satır başkasınaysa hiçbiri gösterilmez", () => {
+    const isLocked = () => false;
+    expect(revealedTeams(false, isLocked)).toEqual([]);
+  });
+
+  it("her iki takım da kilitliyken başkasının satırında ikisi de gösterilir", () => {
+    const isLocked = () => true;
+    expect(revealedTeams(false, isLocked)).toEqual(["gs", "fb"]);
   });
 });
