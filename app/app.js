@@ -561,7 +561,7 @@ function render() {
 
 Object.assign(window, {
   S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
-  saveDisplayName,
+  saveDisplayName, locked,
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
   openRow, closeRow, setScope, peek, toggleEdit, refresh
 });
