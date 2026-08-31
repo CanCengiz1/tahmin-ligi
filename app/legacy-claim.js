@@ -10,6 +10,7 @@ if (!configured) {
 
   let legacyScreenOpen = false;
   let busy = false;
+  let pendingOverwrite = false;
 
   const state = () => window.S;
   const userKey = suffix => state()?.user?.id ? `tl_legacy_${suffix}:${state().user.id}` : null;
@@ -25,6 +26,25 @@ if (!configured) {
     );
   }
 
+  // Server tarafındaki claim RPC'si "hedefte tahmin var mı" kararını satır
+  // varlığına göre veriyor (içerik boş olsa da). Uyarı/onay akışı bu yüzden
+  // görsel sezgiye değil gerçek satır sayısına bakmalı.
+  async function hasExistingPredictionRows() {
+    const uid = state()?.user?.id;
+    if (!uid) return false;
+    try {
+      const { count, error } = await supabase
+        .from("team_predictions")
+        .select("team_key", { count:"exact", head:true })
+        .eq("user_id", uid);
+      if (error) throw error;
+      return (count || 0) > 0;
+    } catch (e) {
+      console.error(e);
+      return hasVisiblePredictionData();
+    }
+  }
+
   function offerDismissed() {
     const key = userKey("offer_dismissed");
     return key ? localStorage.getItem(key) === "1" : false;
@@ -35,18 +55,37 @@ if (!configured) {
     return key ? localStorage.getItem(key) === "1" : false;
   }
 
-  function shouldOffer() {
+  // Kilit her iki takım için de geçtiyse legacy claim'in kilit-sonrası geri
+  // yükleme özelliği hâlâ çalışır (RPC bunu bilerek destekler), ama teklifi
+  // ön yüzde göstermeye artık gerek yok.
+  function anyTeamOpen() {
+    const isLocked = window.locked;
+    if (typeof isLocked !== "function") return true;
+    return ["gs", "fb"].some(k => !isLocked(k));
+  }
+
+  function eligibleForOffer() {
     const s = state();
-    return !!s?.user && !!s?.me && !legacyScreenOpen &&
-      !offerDismissed() && !alreadyMigrated() && !hasVisiblePredictionData();
+    return !!s?.user && !!s?.me && !legacyScreenOpen && !alreadyMigrated() && anyTeamOpen();
   }
 
   function injectOffer() {
-    if (!shouldOffer()) return;
+    if (!eligibleForOffer()) return;
     const app = document.getElementById("app");
-    if (!app || app.querySelector("#legacy-account-offer")) return;
+    if (!app) return;
     const nav = app.querySelector(".wrap > nav");
-    if (!nav) return;
+    if (!nav || app.querySelector("#legacy-account-offer") || app.querySelector("#legacy-account-link")) return;
+
+    if (offerDismissed()) {
+      // Kart kapatıldı ama taşıma hâlâ mümkün: küçük bir giriş noktası bırak.
+      const wrap = document.createElement("div");
+      wrap.id = "legacy-account-link";
+      wrap.style.margin = "12px 20px 0";
+      wrap.innerHTML = '<button class="ghost">Eski PIN hesabını taşı</button>';
+      wrap.querySelector("button")?.addEventListener("click", openClaimScreen);
+      nav.insertAdjacentElement("afterend", wrap);
+      return;
+    }
 
     const card = document.createElement("div");
     card.id = "legacy-account-offer";
@@ -67,6 +106,7 @@ if (!configured) {
       const key = userKey("offer_dismissed");
       if (key) localStorage.setItem(key, "1");
       card.remove();
+      queueMicrotask(injectOffer);
     });
   }
 
@@ -75,19 +115,23 @@ if (!configured) {
     if (el) el.textContent = text || "";
   }
 
-  function openClaimScreen() {
+  async function openClaimScreen() {
     const s = state();
     if (!s?.user || !s?.me) return;
-    if (hasVisiblePredictionData()) {
-      s.msg = "Eski hesabı taşıma işlemi yeni hesapta tahmin oluşturmadan önce yapılabilir.";
-      window.render?.();
-      return;
-    }
 
     legacyScreenOpen = true;
     s.legacyClaimOpen = true;
     const app = document.getElementById("app");
     if (!app) return;
+    app.innerHTML = '<div id="join"><div><h1 class="big">Eski hesabını taşı</h1><p class="lead">Yükleniyor…</p></div></div>';
+
+    pendingOverwrite = await hasExistingPredictionRows();
+    if (!legacyScreenOpen) return; // bu sırada kapatıldıysa (ör. çıkış yapıldı) çizme
+
+    const warn = pendingOverwrite
+      ? '<div class="warn">Bu hesapta zaten girilmiş tahminler var. Eski hesabı taşırsan bu tahminlerin üzerine yazılır ve geri alınamaz.</div>'
+      : '';
+
     app.innerHTML = `
       <div id="join"><div>
         <h1 class="big">Eski hesabını taşı</h1>
@@ -95,6 +139,7 @@ if (!configured) {
           Önceki Tahmin Ligi sürümünde kullandığın kullanıcı adı ve 6 haneli PIN ile
           eski GS/FB tahminlerini bu hesaba aktar.
         </p>
+        ${warn}
         <label class="lbl" for="legacy-name">Eski kullanıcı adı</label>
         <input id="legacy-name" class="field" maxlength="40" autocomplete="off" placeholder="Eski takma adın">
         <label class="lbl" for="legacy-pin">Eski 6 haneli PIN</label>
@@ -102,8 +147,7 @@ if (!configured) {
         <button id="legacy-claim-submit" class="primary">Eski tahminleri taşı</button>
         <p id="legacy-claim-message" class="fine authmsg"></p>
         <p class="fine">
-          Taşıma tek seferliktir. Yeni hesabında tahmin oluşturduysan mevcut verinin
-          üstüne yazılmaz. Eski admin yetkisi güvenlik nedeniyle otomatik taşınmaz.
+          Taşıma tek seferliktir. Eski admin yetkisi güvenlik nedeniyle otomatik taşınmaz.
         </p>
         <button id="legacy-claim-back" class="back">← Uygulamaya dön</button>
       </div></div>`;
@@ -152,6 +196,14 @@ if (!configured) {
     if (!name) return renderMessage("Eski kullanıcı adını yaz.");
     if (!/^[0-9]{6}$/.test(pin)) return renderMessage("Eski PIN 6 rakam olmalı.");
 
+    if (pendingOverwrite) {
+      const ok = window.confirm(
+        "Bu hesapta zaten girilmiş tahminler var. Eski hesabı taşırsan bu tahminlerin " +
+        "üzerine yazılır ve geri alınamaz. Devam edilsin mi?"
+      );
+      if (!ok) return;
+    }
+
     busy = true;
     const button = document.getElementById("legacy-claim-submit");
     if (button) { button.disabled = true; button.textContent = "Taşınıyor…"; }
@@ -163,7 +215,7 @@ if (!configured) {
       if (!session?.user || session.user.id !== state()?.user?.id) throw new Error("Oturum doğrulanamadı. Tekrar giriş yap.");
 
       const pinHash = await legacyPinHash(name, pin);
-      const { data, error } = await supabase.rpc("claim_legacy_account", { p_pin_hash:pinHash });
+      const { data, error } = await supabase.rpc("claim_legacy_account", { p_pin_hash:pinHash, p_overwrite:pendingOverwrite });
       if (error) throw error;
       if (!data?.ok) throw new Error(claimError(data?.code));
 
