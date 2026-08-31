@@ -29,12 +29,21 @@ Mevcut tek-lig kurulumunda SQL Editor'da sırasıyla:
 1. `supabase/migrations/0001_single_league.sql`
 2. `supabase/migrations/0003_auth_single_league.sql`
 3. `supabase/migrations/0004_legacy_account_claim.sql`
+4. `supabase/migrations/0005_google_oauth_profiles.sql`
 
 çalıştırın. `0002_multi_league.sql` gelecek çoklu-lig şemasıdır ve mevcut ön yüz
 henüz onu kullanmaz.
 
 Supabase Dashboard → Authentication → Providers altında Email provider açık
 olmalıdır. Prod ortamında e-posta doğrulamasını açık tutmak önerilir.
+
+Google ile giriş için aynı sayfada Google provider'ı açın, Google Cloud
+Console'da oluşturduğunuz OAuth Client ID/Secret'ı girin ve Google Cloud
+Console'daki "Authorized redirect URI" listesine Supabase'in verdiği
+`https://<proje-ref>.supabase.co/auth/v1/callback` adresini ekleyin.
+Authentication → URL Configuration altında uygulamanın çalıştığı adresi
+(ör. `https://tahmin-ligi.example.com`) Site URL / Redirect URLs listesine
+eklemeyi unutmayın, aksi halde giriş sonrası yönlendirme reddedilir.
 
 ### Legacy PIN hesaplarını taşıma
 

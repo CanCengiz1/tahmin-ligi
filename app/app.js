@@ -37,6 +37,7 @@ const TEAMS = {
 const NEUTRAL = {bg:"#0B0D10",panel:"#14181E",line:"#252C36",accent:"#C8D2E0",text:"#EDF1F6",dim:"#7D8794"};
 const ART = '<svg class="shake" viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="İki kişi el ele tutuşuyor"><defs><pattern id="gsp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#A90432"/><rect width="8" height="18" fill="#F5A800"/></pattern><pattern id="fbp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#12356E"/><rect width="8" height="18" fill="#FFE500"/></pattern></defs><circle cx="100" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 79,44 A 21,21 0 0 1 121,44 Z" fill="#2A2117"/><rect x="92" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 68,90 L 56,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 132,90 L 145,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="74" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="79" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="106" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="59" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="124" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="72" y="66" width="56" height="66" rx="12" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><circle cx="200" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 179,44 A 21,21 0 0 1 221,44 Z" fill="#2A2117"/><rect x="192" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 232,90 L 244,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 168,90 L 155,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="174" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="179" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="206" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="159" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="224" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="172" y="66" width="56" height="66" rx="12" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><circle cx="150" cy="115" r="12" fill="#F3EBDA" stroke="#0B0D10" stroke-width="3"/></svg>';
 const PICKS = [{v:3,t:"Galibiyet"},{v:1,t:"Beraberlik"},{v:0,t:"Mağlubiyet"}];
+const GOOGLE_ICON = '<svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>';
 
 const configured = !!(window.CONFIG && CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
 const supabase = configured ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
@@ -162,6 +163,18 @@ async function bootstrapSession(session) {
   if (!S.me) throw new Error("Kullanıcı profili yüklenemedi.");
 }
 
+let bootstrapPromise = null;
+function ensureBootstrapped(session) {
+  if (!session?.user) return Promise.resolve();
+  if (S.user?.id === session.user.id && S.me) return Promise.resolve();
+  if (bootstrapPromise) return bootstrapPromise;
+  bootstrapPromise = bootstrapSession(session)
+    .then(() => { S.authMsg = ""; })
+    .catch(e => { S.authMsg = authErrorMessage(e); })
+    .finally(() => { bootstrapPromise = null; });
+  return bootstrapPromise;
+}
+
 function authErrorMessage(error) {
   const m = String(error?.message || error || "Bir hata oluştu.");
   if (/invalid login credentials/i.test(m)) return "E-posta veya şifre yanlış.";
@@ -190,7 +203,7 @@ async function signUp() {
   S.authBusy = false;
   if (error) { S.authMsg = authErrorMessage(error); render(); return; }
   if (data.session) {
-    try { await bootstrapSession(data.session); S.authMsg = ""; } catch (e) { S.authMsg = authErrorMessage(e); }
+    await ensureBootstrapped(data.session);
   } else {
     S.authMode = "login";
     S.authMsg = "Hesap oluşturuldu. E-postana gelen doğrulama bağlantısına tıkladıktan sonra giriş yap.";
@@ -208,8 +221,16 @@ async function signIn() {
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   S.authBusy = false;
   if (error) { S.authMsg = authErrorMessage(error); render(); return; }
-  try { await bootstrapSession(data.session); } catch (e) { S.authMsg = authErrorMessage(e); }
+  await ensureBootstrapped(data.session);
   render();
+}
+
+async function signInWithGoogle() {
+  if (!supabase || S.authBusy) return;
+  S.authBusy = true; S.authMsg = ""; render();
+  const redirectTo = window.location.origin + window.location.pathname;
+  const { error } = await supabase.auth.signInWithOAuth({ provider:"google", options:{ redirectTo } });
+  if (error) { S.authBusy = false; S.authMsg = authErrorMessage(error); render(); }
 }
 
 async function requestPasswordReset() {
@@ -353,6 +374,8 @@ function authScreen() {
 
   if (S.authMode === "register") {
     return '<div id="join"><div>' + ART + '<h1 class="big">Hesap oluştur</h1><p class="lead">Tahminlerin artık gerçek bir kullanıcı hesabına bağlı tutulur.</p>' +
+      '<button class="google-btn" ' + (S.authBusy ? 'disabled' : '') + ' onclick="signInWithGoogle()">' + GOOGLE_ICON + '<span>Google ile devam et</span></button>' +
+      '<div class="divider">veya</div>' +
       '<label class="lbl">Kullanıcı adı</label><input id="displayName" class="field" maxlength="40" autocomplete="nickname" placeholder="Arkadaşların seni nasıl tanıyor?">' +
       '<label class="lbl">E-posta</label><input id="email" class="field" type="email" autocomplete="email" placeholder="sen@ornek.com">' +
       '<label class="lbl">Şifre</label><input id="password" class="field" type="password" minlength="6" autocomplete="new-password" placeholder="En az 6 karakter">' +
@@ -376,11 +399,43 @@ function authScreen() {
 
   return '<div id="join"><div>' + ART + '<h1 class="big">Tahmin Ligi</h1>' +
     '<p class="lead">Galatasaray ve Fenerbahçe\'nin 8\'er Şampiyonlar Ligi maçını tahmin et. Hesabına her cihazdan güvenli şekilde dön.</p>' +
+    '<button class="google-btn" ' + (S.authBusy ? 'disabled' : '') + ' onclick="signInWithGoogle()">' + GOOGLE_ICON + '<span>Google ile devam et</span></button>' +
+    '<div class="divider">veya</div>' +
     '<label class="lbl">E-posta</label><input id="email" class="field" type="email" autocomplete="email" placeholder="sen@ornek.com">' +
     '<label class="lbl">Şifre</label><input id="password" class="field" type="password" autocomplete="current-password" placeholder="Şifren">' +
     '<button class="primary" ' + (S.authBusy ? 'disabled' : '') + ' onclick="signIn()">' + (S.authBusy ? 'Giriş yapılıyor…' : 'Giriş yap') + '</button>' + msg +
     '<button class="back" onclick="setAuthMode(\'register\')">Yeni misin? Hesap oluştur</button>' +
     '<button class="back subtle" onclick="setAuthMode(\'forgot\')">Şifremi unuttum</button></div></div>';
+}
+
+function nameScreen() {
+  const msg = S.authMsg ? '<p class="fine authmsg">' + esc(S.authMsg) + '</p>' : '';
+  return '<div id="join"><div>' + ART + '<h1 class="big">Kullanıcı adını seç</h1>' +
+    '<p class="lead">Google hesabından görünen bir ad alamadık. Sıralamada görüneceği için bir kullanıcı adı belirle.</p>' +
+    '<label class="lbl">Kullanıcı adı</label><input id="displayName2" class="field" maxlength="40" autocomplete="nickname" placeholder="Arkadaşların seni nasıl tanıyor?">' +
+    '<button class="primary" ' + (S.authBusy ? 'disabled' : '') + ' onclick="saveDisplayName()">' + (S.authBusy ? 'Kaydediliyor…' : 'Devam et') + '</button>' + msg +
+    '<button class="back" onclick="signOut()">Çıkış yap</button></div></div>';
+}
+
+async function saveDisplayName() {
+  if (!supabase || !S.user || !S.me || S.authBusy) return;
+  const name = normName(document.getElementById("displayName2")?.value);
+  if (name.length < 2 || name.length > 40) { S.authMsg = "Kullanıcı adı 2–40 karakter olmalı."; render(); return; }
+
+  S.authBusy = true; S.authMsg = ""; render();
+  const { error } = await supabase.from("profiles").update({ display_name:name }).eq("id", S.user.id);
+  S.authBusy = false;
+  if (error) {
+    S.authMsg = /duplicate key|unique/i.test(String(error.message || "")) ? "Bu kullanıcı adı zaten alınmış." : (error.message || String(error));
+    render();
+    return;
+  }
+  S.profile = Object.assign({}, S.profile, { display_name:name });
+  S.me.name = name;
+  const idx = S.players.findIndex(p => p.id === S.me.id);
+  if (idx >= 0) S.players[idx] = S.me;
+  S.authMsg = "";
+  render();
 }
 
 function teamView(k) {
@@ -492,6 +547,7 @@ function render() {
   const app = document.getElementById("app");
   if (S.loading) { app.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--dim)">Yükleniyor…</div>'; return; }
   if (S.authMode === "reset" || !S.user || !S.me) { app.innerHTML = authScreen(); return; }
+  if (!S.me.name) { app.innerHTML = nameScreen(); return; }
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
   let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><button class="out" onclick="signOut()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + ' · Çıkış</button></header><nav>';
@@ -504,7 +560,8 @@ function render() {
 }
 
 Object.assign(window, {
-  S, render, go, setAuthMode, signUp, signIn, requestPasswordReset, updatePassword, signOut,
+  S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
+  saveDisplayName,
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
   openRow, closeRow, setScope, peek, toggleEdit, refresh
 });
@@ -520,17 +577,35 @@ if (supabase) {
     }
     if (event === "SIGNED_OUT") {
       S.user = null; S.me = null; S.profile = null; S.admin = false; S.loading = false; S.legacyClaimOpen = false; render();
+      return;
+    }
+    if (event === "SIGNED_IN" || event === "INITIAL_SESSION") {
+      await ensureBootstrapped(session);
+      S.loading = false;
+      render();
     }
   });
 }
 
+function oauthRedirectError() {
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get("error") || url.hash.match(/error=([^&]+)/)?.[1];
+  if (!code) return null;
+  const desc = url.searchParams.get("error_description") || url.hash.match(/error_description=([^&]+)/)?.[1];
+  ["error", "error_description", "error_code"].forEach(k => url.searchParams.delete(k));
+  window.history.replaceState({}, "", url.pathname + url.search);
+  return decodeURIComponent((desc || code).replace(/\+/g, " "));
+}
+
 (async function init(){
+  const redirectError = oauthRedirectError();
+  if (redirectError) S.authMsg = "Google ile giriş tamamlanamadı: " + redirectError;
   render();
   if (!supabase) { S.loading = false; render(); return; }
   try {
     const { data:{session}, error } = await supabase.auth.getSession();
     if (error) throw error;
-    if (session) await bootstrapSession(session);
+    if (session) await ensureBootstrapped(session);
   } catch (e) {
     S.authMsg = authErrorMessage(e);
   }
