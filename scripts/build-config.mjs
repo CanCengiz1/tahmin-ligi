@@ -2,8 +2,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 
 const cfg = {
   SUPABASE_URL: process.env.SUPABASE_URL || "",
-  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || "",
-  ADMINS: (process.env.ADMINS || "").split(",").map(s => s.trim()).filter(Boolean)
+  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || ""
 };
 
 if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
@@ -12,5 +11,5 @@ if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
 }
 
 mkdirSync("app", { recursive: true });
-writeFileSync("app/config.js", `const CONFIG = ${JSON.stringify(cfg, null, 2)};\n`);
+writeFileSync("app/config.js", `window.CONFIG = ${JSON.stringify(cfg, null, 2)};\n`);
 console.log("app/config.js olusturuldu");
