@@ -85,6 +85,7 @@ if (!configured) {
     }
 
     legacyScreenOpen = true;
+    s.legacyClaimOpen = true;
     const app = document.getElementById("app");
     if (!app) return;
     app.innerHTML = `
@@ -116,6 +117,7 @@ if (!configured) {
 
   function closeClaimScreen() {
     legacyScreenOpen = false;
+    if (state()) state().legacyClaimOpen = false;
     window.render?.();
     queueMicrotask(injectOffer);
   }
@@ -168,7 +170,7 @@ if (!configured) {
       const migratedKey = userKey("migrated");
       if (migratedKey) localStorage.setItem(migratedKey, "1");
       legacyScreenOpen = false;
-      if (window.S) window.S.msg = "Eski tahminlerin bu hesaba güvenli şekilde taşındı.";
+      if (window.S) { window.S.legacyClaimOpen = false; window.S.msg = "Eski tahminlerin bu hesaba güvenli şekilde taşındı."; }
       await window.refresh?.();
     } catch (error) {
       console.error(error);

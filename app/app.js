@@ -47,7 +47,7 @@ const S = {
   view:"gs", user:null, me:null, admin:false, profile:null,
   players:[], results:{gs:empty(),fb:empty()}, scores:{gs:empty(),fb:empty()},
   open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, editRow:null, scope:"gs",
-  authMode:"login", authBusy:false, authMsg:""
+  authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -244,7 +244,7 @@ async function updatePassword() {
 async function signOut() {
   if (supabase) await supabase.auth.signOut();
   S.user = null; S.me = null; S.profile = null; S.admin = false;
-  S.view = "gs"; S.authMode = "login"; S.authMsg = ""; S.msg = "";
+  S.view = "gs"; S.authMode = "login"; S.authMsg = ""; S.msg = ""; S.legacyClaimOpen = false;
   render();
 }
 
@@ -488,6 +488,7 @@ function boardView() {
 
 function render() {
   theme();
+  if (S.legacyClaimOpen) return;
   const app = document.getElementById("app");
   if (S.loading) { app.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--dim)">Yükleniyor…</div>'; return; }
   if (S.authMode === "reset" || !S.user || !S.me) { app.innerHTML = authScreen(); return; }
@@ -518,7 +519,7 @@ if (supabase) {
       return;
     }
     if (event === "SIGNED_OUT") {
-      S.user = null; S.me = null; S.profile = null; S.admin = false; S.loading = false; render();
+      S.user = null; S.me = null; S.profile = null; S.admin = false; S.loading = false; S.legacyClaimOpen = false; render();
     }
   });
 }
