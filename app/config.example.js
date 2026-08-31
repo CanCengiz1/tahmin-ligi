@@ -3,7 +3,7 @@
 // config.js git'e girmez (.gitignore). Publishable key tarayicida gorunebilir;
 // güvenlik Supabase Auth + RLS politikaları ile sağlanır.
 
-const CONFIG = {
+window.CONFIG = {
   SUPABASE_URL: "",       // https://xxxx.supabase.co  (sonuna /rest/v1 EKLEMEYIN)
   SUPABASE_ANON_KEY: ""   // Settings > API Keys > publishable key (sb_publishable_...)
 };
