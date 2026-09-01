@@ -48,7 +48,8 @@ const S = {
   view:"gs", user:null, me:null, admin:false, profile:null,
   players:[], results:{gs:empty(),fb:empty()}, scores:{gs:empty(),fb:empty()},
   open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, editRow:null, scope:"gs",
-  authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false
+  authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false,
+  accountMenuOpen:false, signOutBusy:false
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -263,10 +264,75 @@ async function updatePassword() {
 }
 
 async function signOut() {
-  if (supabase) await supabase.auth.signOut();
-  S.user = null; S.me = null; S.profile = null; S.admin = false;
-  S.view = "gs"; S.authMode = "login"; S.authMsg = ""; S.msg = ""; S.legacyClaimOpen = false;
+  if (!supabase || S.signOutBusy) return;
+  S.signOutBusy = true; render();
+  try {
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
+    S.accountMenuOpen = false;
+    S.user = null; S.me = null; S.profile = null; S.admin = false;
+    S.view = "gs"; S.authMode = "login"; S.authMsg = ""; S.msg = ""; S.legacyClaimOpen = false;
+  } catch (e) {
+    console.error(e);
+    S.msg = "Çıkış yapılamadı — " + (e.message || e);
+  } finally {
+    S.signOutBusy = false;
+    render();
+  }
+}
+
+function toggleAccountMenu() {
+  S.accountMenuOpen = !S.accountMenuOpen;
   render();
+  if (S.accountMenuOpen) focusAccountMenu(); else focusAccountTrigger();
+}
+
+function closeAccountMenu() {
+  if (!S.accountMenuOpen) return;
+  S.accountMenuOpen = false;
+  render();
+  focusAccountTrigger();
+}
+
+function focusAccountTrigger() { document.getElementById("acctBtn")?.focus(); }
+function focusAccountMenu() {
+  const panel = document.getElementById("acctMenuPanel");
+  if (!panel) return;
+  const first = panel.querySelector('[role="menuitem"]:not([disabled])');
+  (first || panel).focus();
+}
+
+function openLegacyClaim() {
+  S.accountMenuOpen = false;
+  window.openLegacyClaimScreen?.();
+}
+
+// Profil / Liglerim / Ayarlar gibi yeni satırlar buraya eklenecek.
+function accountMenuItems() {
+  const items = [];
+  if (window.legacyClaimEligible?.()) {
+    items.push({ label:"Eski PIN hesabını taşı", onClick:"openLegacyClaim()" });
+  }
+  return items;
+}
+
+function accountMenu() {
+  if (!S.accountMenuOpen) return "";
+  const email = S.user?.email || "";
+  let html = '<div class="acct-backdrop"></div><div id="acctMenuPanel" class="acct-menu" role="menu" aria-label="Hesap menüsü" tabindex="-1">';
+  html += '<div class="acct-head"><div class="acct-name">' + esc(S.me.name) + '</div>';
+  if (email) html += '<div class="acct-email">' + esc(email) + '</div>';
+  if (S.admin) html += '<div class="acct-badge">Admin</div>';
+  html += '</div>';
+  const items = accountMenuItems();
+  if (items.length) {
+    html += '<div class="acct-items">' + items.map(it =>
+      '<button class="acct-item" role="menuitem" onclick="' + it.onClick + '">' + esc(it.label) + '</button>'
+    ).join('') + '</div>';
+  }
+  html += '<div class="acct-danger"><button class="acct-item" role="menuitem" onclick="signOut()"' + (S.signOutBusy ? ' disabled' : '') + '>' + (S.signOutBusy ? 'Çıkış yapılıyor…' : 'Çıkış yap') + '</button></div>';
+  html += '</div>';
+  return html;
 }
 
 const LOCK_LEAD = 60 * 60 * 1000;
@@ -550,7 +616,7 @@ function render() {
   if (!S.me.name) { app.innerHTML = nameScreen(); return; }
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
-  let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><button class="out" onclick="signOut()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + ' · Çıkış</button></header><nav>';
+  let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><div class="acct"><button id="acctBtn" class="out" aria-haspopup="true" aria-expanded="' + (S.accountMenuOpen ? 'true' : 'false') + '" aria-controls="acctMenuPanel" onclick="toggleAccountMenu()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + '</button>' + accountMenu() + '</div></header><nav>';
   tabs.forEach(t => { const on = S.view === t[0]; html += '<button class="' + (on?'on':'') + '" style="color:' + (on?t[2]:'var(--dim)') + ';border-bottom-color:' + (on?t[2]:'transparent') + '" onclick="go(\'' + t[0] + '\')">' + t[1] + '</button>'; });
   html += '</nav>';
   if (S.msg) html += '<div class="err">' + esc(S.msg) + '</div>';
@@ -563,7 +629,8 @@ Object.assign(window, {
   S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
   saveDisplayName, locked,
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
-  openRow, closeRow, setScope, peek, toggleEdit, refresh
+  openRow, closeRow, setScope, peek, toggleEdit, refresh,
+  toggleAccountMenu, closeAccountMenu, openLegacyClaim
 });
 
 if (supabase) {
@@ -622,4 +689,25 @@ function oauthRedirectError() {
 
   setInterval(() => { if (S.user && S.view === "board" && !S.editing) refresh(); }, 30000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && S.user) refresh(); });
+
+  document.addEventListener("keydown", e => {
+    if (!S.accountMenuOpen) return;
+    if (e.key === "Escape") { e.preventDefault(); closeAccountMenu(); return; }
+    if (e.key === "Tab") {
+      const panel = document.getElementById("acctMenuPanel");
+      if (!panel) return;
+      const focusables = Array.from(panel.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'));
+      if (!focusables.length) return;
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  document.addEventListener("click", e => {
+    if (!S.accountMenuOpen) return;
+    const panel = document.getElementById("acctMenuPanel");
+    const btn = document.getElementById("acctBtn");
+    if (panel?.contains(e.target) || btn?.contains(e.target)) return;
+    closeAccountMenu();
+  }, true);
 })();
