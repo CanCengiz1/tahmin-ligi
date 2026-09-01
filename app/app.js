@@ -141,7 +141,8 @@ const S = {
   open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, scoreDraft:{}, editRow:null, scope:"gs",
   authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false,
   accountMenuOpen:false, signOutBusy:false,
-  predMode:"outcome", scorePreds:new Map()
+  predMode:"outcome", scorePreds:new Map(),
+  rulesOpen:false, rulesScrollTo:null
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -505,9 +506,25 @@ function openLegacyClaim() {
   window.openLegacyClaimScreen?.();
 }
 
+// section verilirse (bkz. Sıralama sekmesindeki ? düğmeleri) ekran açılınca
+// ilgili bölüme kaydırılır; verilmezse (hesap menüsünden) en üstten açılır.
+// S.view'a dokunmuyoruz — Kapat, üstteki ekranı olduğu gibi geri getirir.
+function openRules(section) {
+  S.accountMenuOpen = false;
+  S.rulesOpen = true;
+  S.rulesScrollTo = section || null;
+  render();
+}
+
+function closeRules() {
+  S.rulesOpen = false;
+  S.rulesScrollTo = null;
+  render();
+}
+
 // Profil / Liglerim / Ayarlar gibi yeni satırlar buraya eklenecek.
 function accountMenuItems() {
-  const items = [];
+  const items = [{ label:"Oyun kuralları", onClick:"openRules()" }];
   if (window.legacyClaimEligible?.()) {
     items.push({ label:"Eski PIN hesabını taşı", onClick:"openLegacyClaim()" });
   }
@@ -717,7 +734,7 @@ async function refresh() { if (!S.user) return; try { await pull(); S.msg = ""; 
 function go(v) { S.view = v; S.open = null; render(); if (v === "board") refresh(); }
 
 function theme() {
-  const t = S.view === "board" ? NEUTRAL : TEAMS[S.view];
+  const t = (S.rulesOpen || S.view === "board") ? NEUTRAL : TEAMS[S.view];
   const theme = t.theme || t;
   const r = document.documentElement.style;
   r.setProperty("--bg",theme.bg); r.setProperty("--panel",theme.panel); r.setProperty("--line",theme.line);
@@ -941,7 +958,7 @@ function boardView() {
   let html = '<div class="pad"><div class="scope">';
   [["gs","Galatasaray"],["fb","Fenerbahçe"]].forEach(o => { html += '<button class="' + (S.scope === o[0] ? 'on' : '') + '" onclick="setScope(\'' + o[0] + '\')">' + o[1] + '</button>'; });
   html += '</div><div class="hero"><div><div class="k lbl" style="margin:0">' + TEAMS[st.scope].name + ' kaç puan topladı</div><div class="meta" style="margin-top:6px">' + st.played + '/' + st.total + ' maç girildi' + (st.finished ? ' · tamamlandı' : '') + '</div></div><div class="tot">' + st.at + '</div></div>';
-  html += '<div class="rowhead"><h2 class="sec">Sıralama</h2><button class="ghost" onclick="refresh()">Yenile</button></div><p class="meta" style="margin:-4px 0 14px">' + (st.played ? (st.finished ? 'Toplam puanı tam tutturan kazanır. Tutturan yoksa en çok yaklaşan kazanmış sayılır.' : 'Sezon devam ederken daha çok maçı doğru bilen üstte. Kesin sonuç 8 maç bitince toplam puan farkına göre belli olur.') : 'Maçlar oynandıkça sıralama burada oluşacak.') + '</p>';
+  html += '<div class="rowhead"><span class="sec-wrap"><h2 class="sec">Sıralama</h2><button class="qmark" onclick="openRules(\'sec-tahmin\')" aria-label="Oyun kuralları">?</button></span><button class="ghost" onclick="refresh()">Yenile</button></div><p class="meta" style="margin:-4px 0 14px">' + (st.played ? (st.finished ? 'Toplam puanı tam tutturan kazanır. Tutturan yoksa en çok yaklaşan kazanmış sayılır.' : 'Sezon devam ederken daha çok maçı doğru bilen üstte. Kesin sonuç 8 maç bitince toplam puan farkına göre belli olur.') : 'Maçlar oynandıkça sıralama burada oluşacak.') + '</p>';
 
   if (!st.rows.length) html += '<p class="meta" style="margin-bottom:32px">Henüz kimse katılmadı.</p>';
   else {
@@ -976,7 +993,7 @@ function boardView() {
   }
 
   const sst = scoreStandingsRows();
-  html += '<div class="rowhead" style="margin-top:26px"><h2 class="sec">Skor Tahmini Sıralaması</h2></div><p class="meta" style="margin:-4px 0 12px">' + (sst.played ? 'Tam skoru bilen en çok puanı alır. Eşitlikte tam skor sayısı, sonra doğru averaj sayısı belirleyici.' : 'Sonuçlanan maç olunca burada sıralama oluşacak.') + '</p>';
+  html += '<div class="rowhead" style="margin-top:26px"><span class="sec-wrap"><h2 class="sec">Skor Tahmini Sıralaması</h2><button class="qmark" onclick="openRules(\'sec-skor\')" aria-label="Oyun kuralları">?</button></span></div><p class="meta" style="margin:-4px 0 12px">' + (sst.played ? 'Tam skoru bilen en çok puanı alır. Eşitlikte tam skor sayısı, sonra doğru averaj sayısı belirleyici.' : 'Sonuçlanan maç olunca burada sıralama oluşacak.') + '</p>';
   if (!sst.played || !sst.rows.length) html += '<p class="meta" style="margin-bottom:24px">Henüz veri yok.</p>';
   else {
     sst.rows.forEach((p,i) => {
@@ -1024,6 +1041,24 @@ function boardView() {
   return html;
 }
 
+function rulesScreen() {
+  return '<div class="wrap"><header><h1>Oyun kuralları</h1><button class="out" onclick="closeRules()">Kapat</button></header><div class="pad">' +
+    '<section id="sec-tahmin"><h2 class="sec">Tahmin Ligi</h2>' +
+      '<p class="rules-p">Her maç için o maçtan alınacak puanı tahmin edersin: galibiyet 3, beraberlik 1, mağlubiyet 0. Tahminler o takımın ilk maçından bir saat önce kilitlenir ve sonra değiştirilemez. Kazanan, takımın 8 maçta topladığı gerçek toplama en yakın tahmini yapan kişidir. Eşitlik olursa maç bazında daha çok doğru bilen öne geçer, o da eşitse tahminini önce kesinleştiren. Kilitten önce kimse başkasının tahminini göremez.</p>' +
+    '</section>' +
+    '<section id="sec-skor" style="margin-top:32px"><h2 class="sec">Skor Tahmini</h2>' +
+      '<p class="rules-p">Maçın skorunu tahmin edersin. Her maç kendi başlangıç saatinde kilitlenir.</p>' +
+      '<table class="rules-table">' +
+        '<tr><td>Tam skor</td><td>5</td></tr>' +
+        '<tr><td>Doğru kazanan + doğru gol farkı</td><td>3</td></tr>' +
+        '<tr><td>Sadece doğru kazanan</td><td>1</td></tr>' +
+        '<tr><td>Yanlış yön</td><td>0</td></tr>' +
+      '</table>' +
+      '<p class="rules-p">Beraberlik tahminleri 3\'lük kademeye girmez — her beraberliğin gol farkı zaten sıfır olduğu için 3 vermek "berabere" demeyi sistematik olarak avantajlı hale getirirdi; tam skoru tutturan beraberlik yine 5 alır. Bu sıralama ana yarışmayı etkilemez, ayrı tutulur.</p>' +
+    '</section>' +
+  '</div></div>';
+}
+
 function render() {
   theme();
   if (S.legacyClaimOpen) return;
@@ -1031,6 +1066,14 @@ function render() {
   if (S.loading) { app.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--dim)">Yükleniyor…</div>'; return; }
   if (S.authMode === "reset" || !S.user || !S.me) { app.innerHTML = authScreen(); return; }
   if (!S.me.name) { app.innerHTML = nameScreen(); return; }
+  if (S.rulesOpen) {
+    app.innerHTML = rulesScreen();
+    if (S.rulesScrollTo) {
+      const id = S.rulesScrollTo; S.rulesScrollTo = null;
+      requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior:"smooth", block:"start" }));
+    }
+    return;
+  }
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
   let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><div class="acct"><button id="acctBtn" class="out" aria-haspopup="true" aria-expanded="' + (S.accountMenuOpen ? 'true' : 'false') + '" aria-controls="acctMenuPanel" onclick="toggleAccountMenu()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + '</button>' + accountMenu() + '</div></header><nav>';
@@ -1048,7 +1091,7 @@ Object.assign(window, {
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt, onScoreInput,
   setPredMode, saveScorePick,
   openRow, closeRow, setScope, peek, toggleEdit, refresh,
-  toggleAccountMenu, closeAccountMenu, openLegacyClaim,
+  toggleAccountMenu, closeAccountMenu, openLegacyClaim, openRules, closeRules,
   teamLogoFallback
 });
 
