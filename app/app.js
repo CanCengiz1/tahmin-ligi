@@ -138,7 +138,7 @@ const supabase = configured ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_
 const S = {
   view:"gs", user:null, me:null, admin:false, profile:null,
   players:[], results:{gs:empty(),fb:empty()}, scores:{gs:empty(),fb:empty()},
-  open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, editRow:null, scope:"gs",
+  open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, scoreDraft:{}, editRow:null, scope:"gs",
   authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false,
   accountMenuOpen:false, signOutBusy:false,
   predMode:"outcome", scorePreds:new Map()
@@ -305,6 +305,30 @@ async function saveResults(team) {
       updated_by:S.user.id,
       updated_at:new Date().toISOString()
     }, { onConflict:"team_key" });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error(e);
+    S.msg = /row-level security|permission denied/i.test(String(e?.message || e))
+      ? "Bu işlem için admin yetkisi gerekli."
+      : (e.message || String(e));
+    return false;
+  }
+}
+
+// Gerçek skorların tek kaynağı fixtures.home_goals/away_goals — skor tahmini
+// sıralaması buradan okuyor (bkz. scoreStandingsRows). team_results.scores
+// hâlâ yazılıyor, ana sıralama ve "Maç sonuçları" listesi onu kullanmaya
+// devam ediyor; ikisi arasında admin panelinde tek girişten türetiliyor.
+async function saveFixtureResult(fixtureId, homeGoals, awayGoals) {
+  if (!fixtureId) return true; // fikstür DB'den henüz yüklenmediyse (id yok) sessizce atlanır
+  if (!supabase || !S.user || !isAdmin()) return false;
+  try {
+    const { error } = await supabase.from("fixtures").update({
+      home_goals:homeGoals,
+      away_goals:awayGoals,
+      updated_at:new Date().toISOString()
+    }).eq("id", fixtureId);
     if (error) throw error;
     return true;
   } catch (e) {
@@ -563,6 +587,48 @@ async function saveScorePick(fixtureId) {
 
 function isAdmin() { return !!S.user && S.admin; }
 
+// dk satırında admin şu an ne yazıyorsa (henüz kaydedilmemiş) onu döner.
+// Öncelik: elle seçilmiş puan (ptDraft) > skor kutularından türetilen puan >
+// önceden kaydedilmiş puan. Skor kutusu değiştiğinde ptDraft siliniyor
+// (bkz. onScoreInput), böylece yeni skor otomatik türetmeye geri döner.
+function currentPoint(team, i) {
+  const dk = team + ":" + i;
+  if (S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null) return S.ptDraft[dk];
+  const draft = S.scoreDraft[dk];
+  if (draft) {
+    const f = parseInt(draft[0], 10), a = parseInt(draft[1], 10);
+    if (Number.isInteger(f) && f >= 0 && Number.isInteger(a) && a >= 0) return f > a ? 3 : (f === a ? 1 : 0);
+  }
+  return S.results[team][i];
+}
+
+// Satırın <input> kutularında o an ne yazılıysa S.scoreDraft'a alır. Bir
+// render() satırı yeniden çizmeden önce mutlaka çağrılmalı — aksi hâlde
+// innerHTML değişimi kutulardaki henüz kaydedilmemiş yazıyı siler.
+function captureScoreDraft(team, i) {
+  const f = document.getElementById("sf_" + team + "_" + i)?.value;
+  const a = document.getElementById("sa_" + team + "_" + i)?.value;
+  if (f !== undefined && a !== undefined) S.scoreDraft[team + ":" + i] = [f, a];
+}
+
+// Tam render() yerine yalnızca puan düğmelerinin görünümünü günceller —
+// odak/imleç konumunu kaybetmeden skor yazarken canlı önizleme sağlar.
+function updatePointButtonsUI(team, i) {
+  const wrap = document.getElementById("pts_" + team + ":" + i);
+  if (!wrap) return;
+  const cur = currentPoint(team, i);
+  const accent = TEAMS[team].theme.accent;
+  Array.from(wrap.querySelectorAll("button[data-pv]")).forEach(btn => {
+    btn.style.cssText = Number(btn.dataset.pv) === cur ? ('background:' + accent + ';color:#0B0D10;border-color:' + accent) : '';
+  });
+}
+
+function onScoreInput(team, i) {
+  captureScoreDraft(team, i);
+  delete S.ptDraft[team + ":" + i];
+  updatePointButtonsUI(team, i);
+}
+
 async function saveScore(team, i) {
   if (!isAdmin()) return;
   const g = id => parseInt(String(document.getElementById(id)?.value || "").trim(), 10);
@@ -571,25 +637,46 @@ async function saveScore(team, i) {
   const key = team + ":" + i;
   const p = S.ptDraft[key] !== undefined && S.ptDraft[key] !== null ? S.ptDraft[key] : (f > a ? 3 : (f === a ? 1 : 0));
   delete S.ptDraft[key];
+  delete S.scoreDraft[key];
   if (S.editRow === key) S.editRow = null;
   S.results[team] = S.results[team].slice(); S.results[team][i] = p;
   S.scores[team] = S.scores[team].slice(); S.scores[team][i] = [f, a];
   S.msg = ""; render();
-  if (!(await saveResults(team))) { S.msg = S.msg || "Sonuç kaydedilemedi."; render(); }
+
+  // Admin her zaman "kendi takımı - rakip" sırasında girer; fixtures.home_goals
+  // /away_goals gerçek maç yönelimi ister, o yüzden o takımın bu maçta iç saha
+  // olup olmadığına bakarak çeviriyoruz.
+  const m = TEAMS[team].matches[i];
+  const homeGoals = m.home ? f : a, awayGoals = m.home ? a : f;
+  const resultsOk = await saveResults(team);
+  const fixtureOk = await saveFixtureResult(m.id, homeGoals, awayGoals);
+  if (fixtureOk && m.id) { m.homeGoals = homeGoals; m.awayGoals = awayGoals; }
+  if (!resultsOk || !fixtureOk) { S.msg = S.msg || "Sonuç kaydedilemedi."; render(); }
+}
+
+async function clearAllFixtureResults() {
+  const matches = [].concat(TEAMS.gs.matches || [], TEAMS.fb.matches || []).filter(m => m.id);
+  const oks = await Promise.all(matches.map(m => saveFixtureResult(m.id, null, null)));
+  matches.forEach((m, idx) => { if (oks[idx]) { m.homeGoals = null; m.awayGoals = null; } });
+  return oks.every(Boolean);
 }
 
 async function clearAllScores() {
   if (!isAdmin()) return;
   if (!confirm("Girilen bütün skorlar ve puanlar silinecek. Emin misin?")) return;
   S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.msg = ""; render();
-  if (!(await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean)) { S.msg = S.msg || "Silinemedi."; render(); }
+  const resultsOk = (await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean);
+  const fixturesOk = await clearAllFixtureResults();
+  if (!resultsOk || !fixturesOk) { S.msg = S.msg || "Silinemedi."; render(); }
 }
 
 async function clearAll() {
   if (!isAdmin()) return;
   if (!confirm("Girilen bütün skorlar ve puanlar silinecek. Emin misin?")) return;
-  S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.ptDraft = {}; render();
-  if (!(await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean)) { S.msg = S.msg || "Sıfırlanamadı."; render(); }
+  S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.ptDraft = {}; S.scoreDraft = {}; render();
+  const resultsOk = (await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean);
+  const fixturesOk = await clearAllFixtureResults();
+  if (!resultsOk || !fixturesOk) { S.msg = S.msg || "Sıfırlanamadı."; render(); }
 }
 
 async function clearScore(team, i) {
@@ -597,12 +684,21 @@ async function clearScore(team, i) {
   S.results[team] = S.results[team].slice(); S.results[team][i] = null;
   S.scores[team] = S.scores[team].slice(); S.scores[team][i] = null;
   render();
-  if (!(await saveResults(team))) { S.msg = S.msg || "Sonuç silinemedi."; render(); }
+  const m = TEAMS[team].matches[i];
+  const resultsOk = await saveResults(team);
+  const fixtureOk = await saveFixtureResult(m.id, null, null);
+  if (fixtureOk && m.id) { m.homeGoals = null; m.awayGoals = null; }
+  if (!resultsOk || !fixtureOk) { S.msg = S.msg || "Sonuç silinemedi."; render(); }
 }
 
-function setPt(team, i, v) { if (isAdmin()) { S.ptDraft[team + ":" + i] = v; render(); } }
+function setPt(team, i, v) {
+  if (!isAdmin()) return;
+  captureScoreDraft(team, i);
+  S.ptDraft[team + ":" + i] = v;
+  render();
+}
 function openRow(team, i) { if (isAdmin()) { S.editRow = team + ":" + i; render(); } }
-function closeRow(team, i) { if (S.editRow === team + ":" + i) S.editRow = null; delete S.ptDraft[team + ":" + i]; render(); }
+function closeRow(team, i) { if (S.editRow === team + ":" + i) S.editRow = null; delete S.ptDraft[team + ":" + i]; delete S.scoreDraft[team + ":" + i]; render(); }
 function setScope(v) { S.scope = v; S.open = null; render(); }
 function peek(id) { S.openMatch = S.openMatch === id ? null : id; render(); if (S.openMatch) refresh(); }
 function toggleEdit() { if (isAdmin()) { S.editing = !S.editing; S.msg = ""; render(); } }
@@ -887,10 +983,13 @@ function boardView() {
       const done = Date.now() >= new Date(m.iso).getTime(), v = S.results[k][i], sc = (S.scores[k] || empty())[i], dk = k + ':' + i, editing = admin && S.editing && S.editRow === dk;
       html += '<div class="res' + (editing ? ' col' : '') + '">' + teamLogo(m.oppTeam, "sm") + '<div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
       if (editing) {
-        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].tla + '" value="' + (sc ? sc[0] : '') + '"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + (sc ? sc[1] : '') + '"></div>';
-        const cur = S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null ? S.ptDraft[dk] : v;
-        html += '<div class="pts">';
-        PICKS.forEach(pp => { const on = cur === pp.v; html += '<button onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
+        const draft = S.scoreDraft[dk];
+        const fVal = draft ? draft[0] : (sc ? sc[0] : '');
+        const aVal = draft ? draft[1] : (sc ? sc[1] : '');
+        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].tla + '" value="' + esc(fVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"></div>';
+        const cur = currentPoint(k, i);
+        html += '<div class="pts" id="pts_' + dk + '">';
+        PICKS.forEach(pp => { const on = cur === pp.v; html += '<button data-pv="' + pp.v + '" onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
         html += '<button class="ok" onclick="saveScore(\'' + k + '\',' + i + ')">Kaydet</button><button class="cancel" onclick="closeRow(\'' + k + '\',' + i + ')">Vazgeç</button></div>';
       } else {
         html += '<div class="done">' + (sc ? '<span class="skor">' + sc[0] + '-' + sc[1] + '</span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
@@ -925,7 +1024,7 @@ function render() {
 Object.assign(window, {
   S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
   saveDisplayName, locked,
-  pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
+  pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt, onScoreInput,
   setPredMode, saveScorePick,
   openRow, closeRow, setScope, peek, toggleEdit, refresh,
   toggleAccountMenu, closeAccountMenu, openLegacyClaim,
