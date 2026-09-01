@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { empty, tally, confirmedAt, standings, revealedTeams, MATCH_COUNT } from "./scoring.js";
+import {
+  empty, tally, confirmedAt, standings, revealedTeams, MATCH_COUNT,
+  scoreMatchPrediction, compareScorePredictionRows,
+} from "./scoring.js";
 
 const win = (...vals) => vals; // 3/1/0 dizisini okunaklı kurmak için
 
@@ -203,6 +206,78 @@ describe("standings", () => {
     expect(standings(players, results, "gs", { revealed: true }).revealed).toBe(true);
     expect(standings(players, results, "gs", { revealed: false }).revealed).toBe(false);
     expect(standings(players, results, "gs").revealed).toBe(false);
+  });
+});
+
+describe("scoreMatchPrediction", () => {
+  it("tam skor 5 puan alır", () => {
+    expect(scoreMatchPrediction(2, 1, 2, 1)).toBe(5);
+  });
+
+  it("doğru kazanan ve doğru averaj ama tam skor değilse 3 puan alır", () => {
+    // tahmin 2-0 (averaj +2, ev sahibi kazanıyor), gerçek 3-1 (averaj +2, ev sahibi kazanıyor)
+    expect(scoreMatchPrediction(2, 0, 3, 1)).toBe(3);
+  });
+
+  it("doğru kazanan ama yanlış averajda 1 puan alır", () => {
+    // tahmin 2-0 (averaj +2), gerçek 1-0 (averaj +1) — ikisi de ev sahibi kazanıyor
+    expect(scoreMatchPrediction(2, 0, 1, 0)).toBe(1);
+  });
+
+  it("tam skor olmayan beraberlik tahmini yalnızca 1 puan alır, asla 3 değil", () => {
+    // Beraberliğin averajı her zaman 0'dır; tam skor değilse averaj testi
+    // otomatik geçer ama kural bunu bilerek 3'e değil 1'e düşürür.
+    expect(scoreMatchPrediction(0, 0, 1, 1)).toBe(1);
+    expect(scoreMatchPrediction(2, 2, 1, 1)).toBe(1);
+  });
+
+  it("beraberlik tam tutunca 5 puan alır", () => {
+    expect(scoreMatchPrediction(1, 1, 1, 1)).toBe(5);
+  });
+
+  it("yüksek skorlarda da kural aynı şekilde çalışır", () => {
+    expect(scoreMatchPrediction(6, 4, 6, 4)).toBe(5); // tam skor
+    expect(scoreMatchPrediction(4, 1, 5, 2)).toBe(3); // averaj +3, ikisi de ev sahibi kazanıyor
+  });
+
+  it("yön yanlışsa (ev sahibi/deplasman ters) 0 puan alır", () => {
+    // tahmin ev sahibi kazanır, gerçekte deplasman kazanıyor
+    expect(scoreMatchPrediction(2, 0, 0, 1)).toBe(0);
+    // tahmin beraberlik, gerçekte ev sahibi kazanıyor
+    expect(scoreMatchPrediction(1, 1, 2, 1)).toBe(0);
+  });
+
+  it("gerçek sonuç eksikse (null/undefined) null döner", () => {
+    expect(scoreMatchPrediction(2, 1, null, 1)).toBe(null);
+    expect(scoreMatchPrediction(2, 1, 2, null)).toBe(null);
+    expect(scoreMatchPrediction(2, 1, undefined, undefined)).toBe(null);
+  });
+});
+
+describe("compareScorePredictionRows", () => {
+  it("önce toplam puana göre sıralar", () => {
+    const a = { points: 10, exact: 0, diff: 0 };
+    const b = { points: 12, exact: 0, diff: 0 };
+    expect(compareScorePredictionRows(a, b)).toBeGreaterThan(0); // b önde
+    expect(compareScorePredictionRows(b, a)).toBeLessThan(0); // a geride
+  });
+
+  it("puanlar eşitse daha çok tam skor önde olur", () => {
+    const a = { points: 10, exact: 1, diff: 3 };
+    const b = { points: 10, exact: 2, diff: 0 };
+    expect(compareScorePredictionRows(a, b)).toBeGreaterThan(0); // b önde
+  });
+
+  it("puan ve tam skor eşitse daha çok doğru averaj önde olur", () => {
+    const a = { points: 10, exact: 1, diff: 1 };
+    const b = { points: 10, exact: 1, diff: 2 };
+    expect(compareScorePredictionRows(a, b)).toBeGreaterThan(0); // b önde
+  });
+
+  it("her şey eşitse eşit sıradadır (0)", () => {
+    const a = { points: 10, exact: 1, diff: 2 };
+    const b = { points: 10, exact: 1, diff: 2 };
+    expect(compareScorePredictionRows(a, b)).toBe(0);
   });
 });
 
