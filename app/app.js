@@ -591,24 +591,33 @@ function isAdmin() { return !!S.user && S.admin; }
 // Öncelik: elle seçilmiş puan (ptDraft) > skor kutularından türetilen puan >
 // önceden kaydedilmiş puan. Skor kutusu değiştiğinde ptDraft siliniyor
 // (bkz. onScoreInput), böylece yeni skor otomatik türetmeye geri döner.
+// S.scoreDraft kutuların ekrandaki sırasıyla, yani [ev, deplasman] olarak
+// tutulur (bkz. captureScoreDraft); puan her zaman TAKIMIN kendi averajına
+// göre hesaplanır, o yüzden burada m.home'a bakıp takım/rakip averajına
+// çeviriyoruz.
 function currentPoint(team, i) {
   const dk = team + ":" + i;
   if (S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null) return S.ptDraft[dk];
   const draft = S.scoreDraft[dk];
   if (draft) {
-    const f = parseInt(draft[0], 10), a = parseInt(draft[1], 10);
-    if (Number.isInteger(f) && f >= 0 && Number.isInteger(a) && a >= 0) return f > a ? 3 : (f === a ? 1 : 0);
+    const h = parseInt(draft[0], 10), a = parseInt(draft[1], 10);
+    if (Number.isInteger(h) && h >= 0 && Number.isInteger(a) && a >= 0) {
+      const m = TEAMS[team].matches[i];
+      const own = m.home ? h : a, opp = m.home ? a : h;
+      return own > opp ? 3 : (own === opp ? 1 : 0);
+    }
   }
   return S.results[team][i];
 }
 
-// Satırın <input> kutularında o an ne yazılıysa S.scoreDraft'a alır. Bir
-// render() satırı yeniden çizmeden önce mutlaka çağrılmalı — aksi hâlde
-// innerHTML değişimi kutulardaki henüz kaydedilmemiş yazıyı siler.
+// Satırın <input> kutularında o an ne yazılıysa S.scoreDraft'a alır —
+// kutuların ekrandaki sırasıyla, yani [ev, deplasman]. Bir render() satırı
+// yeniden çizmeden önce mutlaka çağrılmalı — aksi hâlde innerHTML değişimi
+// kutulardaki henüz kaydedilmemiş yazıyı siler.
 function captureScoreDraft(team, i) {
-  const f = document.getElementById("sf_" + team + "_" + i)?.value;
+  const h = document.getElementById("sh_" + team + "_" + i)?.value;
   const a = document.getElementById("sa_" + team + "_" + i)?.value;
-  if (f !== undefined && a !== undefined) S.scoreDraft[team + ":" + i] = [f, a];
+  if (h !== undefined && a !== undefined) S.scoreDraft[team + ":" + i] = [h, a];
 }
 
 // Tam render() yerine yalnızca puan düğmelerinin görünümünü günceller —
@@ -632,25 +641,27 @@ function onScoreInput(team, i) {
 async function saveScore(team, i) {
   if (!isAdmin()) return;
   const g = id => parseInt(String(document.getElementById(id)?.value || "").trim(), 10);
-  const f = g("sf_" + team + "_" + i), a = g("sa_" + team + "_" + i);
-  if (!(f >= 0) || !(a >= 0)) { S.msg = "Skoru iki rakam olarak gir."; render(); return; }
+  const h = g("sh_" + team + "_" + i), a = g("sa_" + team + "_" + i);
+  if (!(h >= 0) || !(a >= 0)) { S.msg = "Skoru iki rakam olarak gir."; render(); return; }
   const key = team + ":" + i;
-  const p = S.ptDraft[key] !== undefined && S.ptDraft[key] !== null ? S.ptDraft[key] : (f > a ? 3 : (f === a ? 1 : 0));
+  // Kutular artık ekranda ev-deplasman sırasında (h, a); puan her zaman
+  // TAKIMIN averajına göre hesaplanır, o yüzden m.home'a bakıp çeviriyoruz.
+  const m = TEAMS[team].matches[i];
+  const own = m.home ? h : a, opp = m.home ? a : h;
+  const p = S.ptDraft[key] !== undefined && S.ptDraft[key] !== null ? S.ptDraft[key] : (own > opp ? 3 : (own === opp ? 1 : 0));
   delete S.ptDraft[key];
   delete S.scoreDraft[key];
   if (S.editRow === key) S.editRow = null;
   S.results[team] = S.results[team].slice(); S.results[team][i] = p;
-  S.scores[team] = S.scores[team].slice(); S.scores[team][i] = [f, a];
+  // team_results.scores geriye dönük uyum için hâlâ "takım-rakip" sırasında
+  // saklanır; ekrandaki ev/deplasman sırası yalnızca render aşamasında
+  // (bkz. boardView) m.home'a göre kuruluyor.
+  S.scores[team] = S.scores[team].slice(); S.scores[team][i] = [own, opp];
   S.msg = ""; render();
 
-  // Admin her zaman "kendi takımı - rakip" sırasında girer; fixtures.home_goals
-  // /away_goals gerçek maç yönelimi ister, o yüzden o takımın bu maçta iç saha
-  // olup olmadığına bakarak çeviriyoruz.
-  const m = TEAMS[team].matches[i];
-  const homeGoals = m.home ? f : a, awayGoals = m.home ? a : f;
   const resultsOk = await saveResults(team);
-  const fixtureOk = await saveFixtureResult(m.id, homeGoals, awayGoals);
-  if (fixtureOk && m.id) { m.homeGoals = homeGoals; m.awayGoals = awayGoals; }
+  const fixtureOk = await saveFixtureResult(m.id, h, a);
+  if (fixtureOk && m.id) { m.homeGoals = h; m.awayGoals = a; }
   if (!resultsOk || !fixtureOk) { S.msg = S.msg || "Sonuç kaydedilemedi."; render(); }
 }
 
@@ -981,26 +992,28 @@ function boardView() {
     html += '<div style="margin-bottom:20px"><div class="lbl" style="color:' + TEAMS[k].theme.accent + ';display:flex;align-items:center;gap:8px">' + teamLogo(TEAMS[k], "sm") + '<span>' + TEAMS[k].name + '</span></div>';
     TEAMS[k].matches.forEach((m,i) => {
       const done = Date.now() >= new Date(m.iso).getTime(), v = S.results[k][i], sc = (S.scores[k] || empty())[i], dk = k + ':' + i, editing = admin && S.editing && S.editRow === dk;
-      // Skor kutuları hep "kendi takımı - rakip" sırasında; kart başlığında
-      // yalnızca rakip adı var, o yüzden kutuların altına takım kısaltmasını
-      // yazmadan "1-2" hangi tarafın olduğu belirsiz kalıyor.
+      // sc her zaman "takım-rakip" sırasında saklanır (bkz. saveScore), ama
+      // ekranda gerçek maç sırasıyla (ev önce) gösteriliyor — takım sekmesindeki
+      // skor tahmini kutularıyla aynı okunuş için.
       const oppTla = (m.oppTeam && m.oppTeam.tla) ? m.oppTeam.tla : String(m.opp || "?").slice(0, 3).toUpperCase();
+      const homeTla = m.home ? TEAMS[k].tla : oppTla, awayTla = m.home ? oppTla : TEAMS[k].tla;
       html += '<div class="res' + (editing ? ' col' : '') + '">' + teamLogo(m.oppTeam, "sm") + '<div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
       if (editing) {
         const draft = S.scoreDraft[dk];
-        const fVal = draft ? draft[0] : (sc ? sc[0] : '');
-        const aVal = draft ? draft[1] : (sc ? sc[1] : '');
+        const hVal = draft ? draft[0] : (sc ? (m.home ? sc[0] : sc[1]) : '');
+        const aVal = draft ? draft[1] : (sc ? (m.home ? sc[1] : sc[0]) : '');
         html += '<div class="sc">' +
-          '<div class="scbox"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(fVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(TEAMS[k].tla) + '</span></div>' +
+          '<div class="scbox"><input id="sh_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(hVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(homeTla) + '</span></div>' +
           '<span class="sep">-</span>' +
-          '<div class="scbox"><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(oppTla) + '</span></div>' +
+          '<div class="scbox"><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(awayTla) + '</span></div>' +
         '</div>';
         const cur = currentPoint(k, i);
         html += '<div class="pts" id="pts_' + dk + '">';
         PICKS.forEach(pp => { const on = cur === pp.v; html += '<button data-pv="' + pp.v + '" onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
         html += '<button class="ok" onclick="saveScore(\'' + k + '\',' + i + ')">Kaydet</button><button class="cancel" onclick="closeRow(\'' + k + '\',' + i + ')">Vazgeç</button></div>';
       } else {
-        html += '<div class="done">' + (sc ? '<span class="skor"><small>' + esc(TEAMS[k].tla) + '</small>' + sc[0] + '-' + sc[1] + '<small>' + esc(oppTla) + '</small></span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
+        const homeVal = sc ? (m.home ? sc[0] : sc[1]) : null, awayVal = sc ? (m.home ? sc[1] : sc[0]) : null;
+        html += '<div class="done">' + (sc ? '<span class="skor"><small>' + esc(homeTla) + '</small>' + homeVal + '-' + awayVal + '<small>' + esc(awayTla) + '</small></span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
       }
       html += '</div>';
     });
