@@ -1,5 +1,5 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
-import { empty, standings, confirmedAt, revealedTeams, MATCH_COUNT } from "./scoring.js";
+import { empty, standings, confirmedAt, revealedTeams, MATCH_COUNT, scoreMatchPrediction, compareScorePredictionRows } from "./scoring.js";
 
 // Son çare listesi: teams/fixtures sorgusu başarısız olursa (ağ, RLS, boş
 // sezon) uygulama boş ekran yerine bununla açılır. loadTeamsFromDB()
@@ -88,7 +88,7 @@ async function loadTeamsFromDB() {
   const [{ data:teamRows, error:teamsError }, { data:fixtureRows, error:fixturesError }] = await Promise.all([
     supabase.from("teams").select(teamCols).in("slug", Object.keys(TRACKED_SLUGS)),
     supabase.from("fixtures")
-      .select("kickoff_at,home:home_team_id(" + teamCols + "),away:away_team_id(" + teamCols + ")")
+      .select("id,kickoff_at,home_goals,away_goals,home:home_team_id(" + teamCols + "),away:away_team_id(" + teamCols + ")")
       .eq("competition_season_id", season.id)
       .order("kickoff_at", { ascending:true })
   ]);
@@ -99,8 +99,11 @@ async function loadTeamsFromDB() {
   const byKey = { gs:[], fb:[] };
   (fixtureRows || []).forEach(row => {
     const homeKey = TRACKED_SLUGS[row.home?.slug], awayKey = TRACKED_SLUGS[row.away?.slug];
-    if (homeKey) byKey[homeKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.away?.name || "?", home:true, oppTeam:dbTeamToLogoTeam(row.away) });
-    if (awayKey) byKey[awayKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.home?.name || "?", home:false, oppTeam:dbTeamToLogoTeam(row.home) });
+    // id/homeGoals/awayGoals maçın gerçek ev/deplasman skorudur, takip edilen
+    // takıma göre değil — score_predictions.home_score/away_score ve
+    // scoreMatchPrediction ile aynı anlamda kullanılıyor.
+    if (homeKey) byKey[homeKey].push({ id:row.id, d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.away?.name || "?", home:true, oppTeam:dbTeamToLogoTeam(row.away), homeGoals:row.home_goals, awayGoals:row.away_goals });
+    if (awayKey) byKey[awayKey].push({ id:row.id, d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.home?.name || "?", home:false, oppTeam:dbTeamToLogoTeam(row.home), homeGoals:row.home_goals, awayGoals:row.away_goals });
   });
 
   const built = {};
@@ -135,9 +138,11 @@ const supabase = configured ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_
 const S = {
   view:"gs", user:null, me:null, admin:false, profile:null,
   players:[], results:{gs:empty(),fb:empty()}, scores:{gs:empty(),fb:empty()},
-  open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, editRow:null, scope:"gs",
+  open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, scoreDraft:{}, editRow:null, scope:"gs",
   authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false,
-  accountMenuOpen:false, signOutBusy:false
+  accountMenuOpen:false, signOutBusy:false,
+  predMode:"outcome", scorePreds:new Map(),
+  rulesOpen:false, rulesSection:null
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -202,14 +207,16 @@ function teamLogo(team, size) {
 
 async function pull() {
   if (!supabase || !S.user) return;
-  const [profilesRes, predictionsRes, resultsRes] = await Promise.all([
+  const [profilesRes, predictionsRes, resultsRes, scoreRes] = await Promise.all([
     supabase.from("profiles").select("id,display_name"),
     supabase.from("team_predictions").select("user_id,team_key,picks,confirmed_at,updated_at"),
-    supabase.from("team_results").select("team_key,points,scores")
+    supabase.from("team_results").select("team_key,points,scores"),
+    supabase.from("score_predictions").select("user_id,fixture_id,home_score,away_score")
   ]);
   if (profilesRes.error) throw profilesRes.error;
   if (predictionsRes.error) throw predictionsRes.error;
   if (resultsRes.error) throw resultsRes.error;
+  if (scoreRes.error) throw scoreRes.error;
 
   const byId = new Map();
   for (const profile of profilesRes.data || []) {
@@ -239,6 +246,12 @@ async function pull() {
     S.results[row.team_key] = normalizePicks(row.points);
     S.scores[row.team_key] = Array.isArray(row.scores) && row.scores.length === 8 ? row.scores : empty();
   }
+
+  S.scorePreds = new Map();
+  for (const row of scoreRes.data || []) {
+    if (!S.scorePreds.has(row.fixture_id)) S.scorePreds.set(row.fixture_id, new Map());
+    S.scorePreds.get(row.fixture_id).set(row.user_id, { home:row.home_score, away:row.away_score });
+  }
 }
 
 async function savePrediction(team) {
@@ -262,6 +275,27 @@ async function savePrediction(team) {
   }
 }
 
+async function saveScorePrediction(fixtureId, home, away) {
+  if (!supabase || !S.user) return false;
+  try {
+    const { error } = await supabase.from("score_predictions").upsert({
+      user_id:S.user.id,
+      fixture_id:fixtureId,
+      home_score:home,
+      away_score:away,
+      updated_at:new Date().toISOString()
+    }, { onConflict:"user_id,fixture_id" });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error(e);
+    S.msg = /row-level security/i.test(String(e?.message || e))
+      ? "Bu skor tahmini artık değiştirilemiyor. Maç başlamış olabilir."
+      : (e.message || String(e));
+    return false;
+  }
+}
+
 async function saveResults(team) {
   if (!supabase || !S.user || !isAdmin()) return false;
   try {
@@ -272,6 +306,30 @@ async function saveResults(team) {
       updated_by:S.user.id,
       updated_at:new Date().toISOString()
     }, { onConflict:"team_key" });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error(e);
+    S.msg = /row-level security|permission denied/i.test(String(e?.message || e))
+      ? "Bu işlem için admin yetkisi gerekli."
+      : (e.message || String(e));
+    return false;
+  }
+}
+
+// Gerçek skorların tek kaynağı fixtures.home_goals/away_goals — skor tahmini
+// sıralaması buradan okuyor (bkz. scoreStandingsRows). team_results.scores
+// hâlâ yazılıyor, ana sıralama ve "Maç sonuçları" listesi onu kullanmaya
+// devam ediyor; ikisi arasında admin panelinde tek girişten türetiliyor.
+async function saveFixtureResult(fixtureId, homeGoals, awayGoals) {
+  if (!fixtureId) return true; // fikstür DB'den henüz yüklenmediyse (id yok) sessizce atlanır
+  if (!supabase || !S.user || !isAdmin()) return false;
+  try {
+    const { error } = await supabase.from("fixtures").update({
+      home_goals:homeGoals,
+      away_goals:awayGoals,
+      updated_at:new Date().toISOString()
+    }).eq("id", fixtureId);
     if (error) throw error;
     return true;
   } catch (e) {
@@ -448,9 +506,25 @@ function openLegacyClaim() {
   window.openLegacyClaimScreen?.();
 }
 
+// section "tahmin"/"skor" verilirse (bkz. Sıralama sekmesindeki ? düğmeleri)
+// yalnızca o bölüm gösterilir; verilmezse (hesap menüsünden) ikisi de.
+// S.view'a dokunmuyoruz — Kapat, üstteki ekranı olduğu gibi geri getirir.
+function openRules(section) {
+  S.accountMenuOpen = false;
+  S.rulesOpen = true;
+  S.rulesSection = section || null;
+  render();
+}
+
+function closeRules() {
+  S.rulesOpen = false;
+  S.rulesSection = null;
+  render();
+}
+
 // Profil / Liglerim / Ayarlar gibi yeni satırlar buraya eklenecek.
 function accountMenuItems() {
-  const items = [];
+  const items = [{ label:"Oyun kuralları", onClick:"openRules()" }];
   if (window.legacyClaimEligible?.()) {
     items.push({ label:"Eski PIN hesabını taşı", onClick:"openLegacyClaim()" });
   }
@@ -510,35 +584,127 @@ async function editTeam(team) {
   if (!(await savePrediction(team))) { S.msg = S.msg || "Kaydedilemedi."; render(); }
 }
 
+function setPredMode(v) { S.predMode = v === "score" ? "score" : "outcome"; render(); }
+
+async function saveScorePick(fixtureId) {
+  if (!S.user) return;
+  const h = parseInt(String(document.getElementById("sh_" + fixtureId)?.value || "").trim(), 10);
+  const a = parseInt(String(document.getElementById("sa_" + fixtureId)?.value || "").trim(), 10);
+  if (!(h >= 0 && h <= 99) || !(a >= 0 && a <= 99)) { S.msg = "Skoru iki sayı olarak gir (0-99)."; render(); return; }
+  S.msg = ""; render();
+  const ok = await saveScorePrediction(fixtureId, h, a);
+  if (ok) {
+    if (!S.scorePreds.has(fixtureId)) S.scorePreds.set(fixtureId, new Map());
+    S.scorePreds.get(fixtureId).set(S.user.id, { home:h, away:a });
+  } else {
+    S.msg = S.msg || "Skor tahmini kaydedilemedi.";
+  }
+  render();
+}
+
 function isAdmin() { return !!S.user && S.admin; }
+
+// dk satırında admin şu an ne yazıyorsa (henüz kaydedilmemiş) onu döner.
+// Öncelik: elle seçilmiş puan (ptDraft) > skor kutularından türetilen puan >
+// önceden kaydedilmiş puan. Skor kutusu değiştiğinde ptDraft siliniyor
+// (bkz. onScoreInput), böylece yeni skor otomatik türetmeye geri döner.
+// S.scoreDraft kutuların ekrandaki sırasıyla, yani [ev, deplasman] olarak
+// tutulur (bkz. captureScoreDraft); puan her zaman TAKIMIN kendi averajına
+// göre hesaplanır, o yüzden burada m.home'a bakıp takım/rakip averajına
+// çeviriyoruz.
+function currentPoint(team, i) {
+  const dk = team + ":" + i;
+  if (S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null) return S.ptDraft[dk];
+  const draft = S.scoreDraft[dk];
+  if (draft) {
+    const h = parseInt(draft[0], 10), a = parseInt(draft[1], 10);
+    if (Number.isInteger(h) && h >= 0 && Number.isInteger(a) && a >= 0) {
+      const m = TEAMS[team].matches[i];
+      const own = m.home ? h : a, opp = m.home ? a : h;
+      return own > opp ? 3 : (own === opp ? 1 : 0);
+    }
+  }
+  return S.results[team][i];
+}
+
+// Satırın <input> kutularında o an ne yazılıysa S.scoreDraft'a alır —
+// kutuların ekrandaki sırasıyla, yani [ev, deplasman]. Bir render() satırı
+// yeniden çizmeden önce mutlaka çağrılmalı — aksi hâlde innerHTML değişimi
+// kutulardaki henüz kaydedilmemiş yazıyı siler.
+function captureScoreDraft(team, i) {
+  const h = document.getElementById("sh_" + team + "_" + i)?.value;
+  const a = document.getElementById("sa_" + team + "_" + i)?.value;
+  if (h !== undefined && a !== undefined) S.scoreDraft[team + ":" + i] = [h, a];
+}
+
+// Tam render() yerine yalnızca puan düğmelerinin görünümünü günceller —
+// odak/imleç konumunu kaybetmeden skor yazarken canlı önizleme sağlar.
+function updatePointButtonsUI(team, i) {
+  const wrap = document.getElementById("pts_" + team + ":" + i);
+  if (!wrap) return;
+  const cur = currentPoint(team, i);
+  const accent = TEAMS[team].theme.accent;
+  Array.from(wrap.querySelectorAll("button[data-pv]")).forEach(btn => {
+    btn.style.cssText = Number(btn.dataset.pv) === cur ? ('background:' + accent + ';color:#0B0D10;border-color:' + accent) : '';
+  });
+}
+
+function onScoreInput(team, i) {
+  captureScoreDraft(team, i);
+  delete S.ptDraft[team + ":" + i];
+  updatePointButtonsUI(team, i);
+}
 
 async function saveScore(team, i) {
   if (!isAdmin()) return;
   const g = id => parseInt(String(document.getElementById(id)?.value || "").trim(), 10);
-  const f = g("sf_" + team + "_" + i), a = g("sa_" + team + "_" + i);
-  if (!(f >= 0) || !(a >= 0)) { S.msg = "Skoru iki rakam olarak gir."; render(); return; }
+  const h = g("sh_" + team + "_" + i), a = g("sa_" + team + "_" + i);
+  if (!(h >= 0) || !(a >= 0)) { S.msg = "Skoru iki rakam olarak gir."; render(); return; }
   const key = team + ":" + i;
-  const p = S.ptDraft[key] !== undefined && S.ptDraft[key] !== null ? S.ptDraft[key] : (f > a ? 3 : (f === a ? 1 : 0));
+  // Kutular artık ekranda ev-deplasman sırasında (h, a); puan her zaman
+  // TAKIMIN averajına göre hesaplanır, o yüzden m.home'a bakıp çeviriyoruz.
+  const m = TEAMS[team].matches[i];
+  const own = m.home ? h : a, opp = m.home ? a : h;
+  const p = S.ptDraft[key] !== undefined && S.ptDraft[key] !== null ? S.ptDraft[key] : (own > opp ? 3 : (own === opp ? 1 : 0));
   delete S.ptDraft[key];
+  delete S.scoreDraft[key];
   if (S.editRow === key) S.editRow = null;
   S.results[team] = S.results[team].slice(); S.results[team][i] = p;
-  S.scores[team] = S.scores[team].slice(); S.scores[team][i] = [f, a];
+  // team_results.scores geriye dönük uyum için hâlâ "takım-rakip" sırasında
+  // saklanır; ekrandaki ev/deplasman sırası yalnızca render aşamasında
+  // (bkz. boardView) m.home'a göre kuruluyor.
+  S.scores[team] = S.scores[team].slice(); S.scores[team][i] = [own, opp];
   S.msg = ""; render();
-  if (!(await saveResults(team))) { S.msg = S.msg || "Sonuç kaydedilemedi."; render(); }
+
+  const resultsOk = await saveResults(team);
+  const fixtureOk = await saveFixtureResult(m.id, h, a);
+  if (fixtureOk && m.id) { m.homeGoals = h; m.awayGoals = a; }
+  if (!resultsOk || !fixtureOk) { S.msg = S.msg || "Sonuç kaydedilemedi."; render(); }
+}
+
+async function clearAllFixtureResults() {
+  const matches = [].concat(TEAMS.gs.matches || [], TEAMS.fb.matches || []).filter(m => m.id);
+  const oks = await Promise.all(matches.map(m => saveFixtureResult(m.id, null, null)));
+  matches.forEach((m, idx) => { if (oks[idx]) { m.homeGoals = null; m.awayGoals = null; } });
+  return oks.every(Boolean);
 }
 
 async function clearAllScores() {
   if (!isAdmin()) return;
   if (!confirm("Girilen bütün skorlar ve puanlar silinecek. Emin misin?")) return;
   S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.msg = ""; render();
-  if (!(await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean)) { S.msg = S.msg || "Silinemedi."; render(); }
+  const resultsOk = (await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean);
+  const fixturesOk = await clearAllFixtureResults();
+  if (!resultsOk || !fixturesOk) { S.msg = S.msg || "Silinemedi."; render(); }
 }
 
 async function clearAll() {
   if (!isAdmin()) return;
   if (!confirm("Girilen bütün skorlar ve puanlar silinecek. Emin misin?")) return;
-  S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.ptDraft = {}; render();
-  if (!(await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean)) { S.msg = S.msg || "Sıfırlanamadı."; render(); }
+  S.results = {gs:empty(), fb:empty()}; S.scores = {gs:empty(), fb:empty()}; S.ptDraft = {}; S.scoreDraft = {}; render();
+  const resultsOk = (await Promise.all([saveResults("gs"), saveResults("fb")])).every(Boolean);
+  const fixturesOk = await clearAllFixtureResults();
+  if (!resultsOk || !fixturesOk) { S.msg = S.msg || "Sıfırlanamadı."; render(); }
 }
 
 async function clearScore(team, i) {
@@ -546,12 +712,21 @@ async function clearScore(team, i) {
   S.results[team] = S.results[team].slice(); S.results[team][i] = null;
   S.scores[team] = S.scores[team].slice(); S.scores[team][i] = null;
   render();
-  if (!(await saveResults(team))) { S.msg = S.msg || "Sonuç silinemedi."; render(); }
+  const m = TEAMS[team].matches[i];
+  const resultsOk = await saveResults(team);
+  const fixtureOk = await saveFixtureResult(m.id, null, null);
+  if (fixtureOk && m.id) { m.homeGoals = null; m.awayGoals = null; }
+  if (!resultsOk || !fixtureOk) { S.msg = S.msg || "Sonuç silinemedi."; render(); }
 }
 
-function setPt(team, i, v) { if (isAdmin()) { S.ptDraft[team + ":" + i] = v; render(); } }
+function setPt(team, i, v) {
+  if (!isAdmin()) return;
+  captureScoreDraft(team, i);
+  S.ptDraft[team + ":" + i] = v;
+  render();
+}
 function openRow(team, i) { if (isAdmin()) { S.editRow = team + ":" + i; render(); } }
-function closeRow(team, i) { if (S.editRow === team + ":" + i) S.editRow = null; delete S.ptDraft[team + ":" + i]; render(); }
+function closeRow(team, i) { if (S.editRow === team + ":" + i) S.editRow = null; delete S.ptDraft[team + ":" + i]; delete S.scoreDraft[team + ":" + i]; render(); }
 function setScope(v) { S.scope = v; S.open = null; render(); }
 function peek(id) { S.openMatch = S.openMatch === id ? null : id; render(); if (S.openMatch) refresh(); }
 function toggleEdit() { if (isAdmin()) { S.editing = !S.editing; S.msg = ""; render(); } }
@@ -559,7 +734,7 @@ async function refresh() { if (!S.user) return; try { await pull(); S.msg = ""; 
 function go(v) { S.view = v; S.open = null; render(); if (v === "board") refresh(); }
 
 function theme() {
-  const t = S.view === "board" ? NEUTRAL : TEAMS[S.view];
+  const t = (S.rulesOpen || S.view === "board") ? NEUTRAL : TEAMS[S.view];
   const theme = t.theme || t;
   const r = document.documentElement.style;
   r.setProperty("--bg",theme.bg); r.setProperty("--panel",theme.panel); r.setProperty("--line",theme.line);
@@ -645,6 +820,79 @@ async function saveDisplayName() {
   render();
 }
 
+// Maç bazlı "Herkesin tahmini" paneli. Sonuç (3/1/0) dağılımı takım
+// kilitlenene kadar gizli kalır — erken açılırsa rakip kopyalayabilir. Skor
+// tahminleri bu kısıtla oynamıyor (0010_score_predictions.sql "skor tahmini
+// oku" politikası kilit öncesinde de herkese açık), bu yüzden burada hep
+// gösterilir ve panel her zaman tıklanabilir.
+function everyoneGuessPanel(k, i, m, hardLock) {
+  const pid = k + ':' + i;
+  const open = S.openMatch === pid;
+  const res = S.results[k];
+  const actualPts = res[i];
+  const votes = S.players.map(p => ({name:p.name, v:(p[k] || empty())[i]})).sort((x,y) => (y.v === null ? -1 : y.v) - (x.v === null ? -1 : x.v) || x.name.localeCompare(y.name,"tr"));
+  const cnt = v => votes.filter(x => x.v === v).length;
+  const scoreMap = m.id ? (S.scorePreds.get(m.id) || new Map()) : new Map();
+  const scoreRows = Array.from(scoreMap.entries()).map(([uid, g]) => {
+    const player = S.players.find(p => p.id === uid);
+    return { name:player ? player.name : "?", home:g.home, away:g.away };
+  }).sort((a,b) => a.name.localeCompare(b.name, "tr"));
+  const hasActual = m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null;
+
+  const summary = hardLock
+    ? ('3: ' + cnt(3) + ' · 1: ' + cnt(1) + ' · 0: ' + cnt(0))
+    : (scoreRows.length ? scoreRows.length + ' skor tahmini' : 'skor tahmini yok');
+  let html = '<button class="peek" onclick="peek(\'' + pid + '\')"><span>Herkesin tahmini</span><span>' + summary + (open ? ' ▴' : ' ▾') + '</span></button>';
+  if (open) {
+    html += '<div class="peekbody">';
+    if (hardLock) {
+      html += '<div class="dist">Sonuç tahmini</div>';
+      if (!votes.length) html += '<div class="dist">Kimse tahmin girmemiş.</div>';
+      else votes.forEach(x => {
+        const right = actualPts !== null && x.v !== null && x.v === actualPts;
+        html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv' + (right ? ' on' : '') + '">' + (x.v === null ? '·' : x.v) + '</span></div>';
+      });
+    }
+    html += '<div class="dist">Skor tahmini' + (hasActual ? ' · gerçek ' + m.homeGoals + '-' + m.awayGoals : '') + '</div>';
+    if (!scoreRows.length) html += '<div class="dist">Kimse skor tahmini girmemiş.</div>';
+    else scoreRows.forEach(x => {
+      const pts = hasActual ? scoreMatchPrediction(x.home, x.away, m.homeGoals, m.awayGoals) : null;
+      html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv wide' + (pts === 5 ? ' on' : '') + '">' + x.home + '-' + x.away + '</span></div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+function scoreCardBody(T, m) {
+  if (!m.id) return '<div class="meta" style="padding:12px 16px">Skor tahmini için fikstür verisi bekleniyor.</div>';
+  const started = Date.now() >= new Date(m.iso).getTime();
+  const homeName = m.home ? T.name : m.opp;
+  const awayName = m.home ? m.opp : T.name;
+  const mine = (S.scorePreds.get(m.id) || new Map()).get(S.user.id);
+  const hasActual = m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null;
+
+  let html = '<div class="spick"><span class="steam"><b>' + esc(homeName) + '</b></span>' +
+    '<input id="sh_' + m.id + '" inputmode="numeric" maxlength="2" value="' + (mine ? mine.home : '') + '"' + (started ? ' disabled' : '') + '>' +
+    '<span class="sep">–</span>' +
+    '<input id="sa_' + m.id + '" inputmode="numeric" maxlength="2" value="' + (mine ? mine.away : '') + '"' + (started ? ' disabled' : '') + '>' +
+    '<span class="steam" style="text-align:right"><b>' + esc(awayName) + '</b></span></div><div class="spactions">';
+
+  if (hasActual && mine) {
+    const pts = scoreMatchPrediction(mine.home, mine.away, m.homeGoals, m.awayGoals);
+    const label = pts === 5 ? 'Tam skor · +5' : pts === 3 ? 'Averaj · +3' : pts === 1 ? 'Sonuç · +1' : 'Kaçtı · +0';
+    html += '<span class="chip' + (pts === 5 ? ' hit' : '') + '">' + label + '</span>';
+  } else if (hasActual) {
+    html += '<span class="chip">Gerçek skor ' + m.homeGoals + '-' + m.awayGoals + '</span>';
+  } else if (started) {
+    html += '<span class="chip">Maç başladı</span>';
+  } else {
+    html += '<button onclick="saveScorePick(\'' + m.id + '\')">Kaydet</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function teamView(k) {
   const T = TEAMS[k], picks = S.me[k] || empty();
   const hardLock = locked(k), conf = confirmedAt(S.me, k), lk = hardLock || !!conf;
@@ -653,35 +901,56 @@ function teamView(k) {
   const res = S.results[k];
   const earned = res.reduce((a,b)=>a+(b||0),0);
   const played = res.filter(x=>x!==null).length;
+  const scoreMode = S.predMode === "score";
   let html = '<div class="strip">' + (hardLock ? '<span>Tahminler kilitlendi — ' + T.matches[0].d + ' maçından 1 saat önce</span>' : '<span>' + (conf ? 'Kaydedildi · kilide kalan' : 'Kilide kalan') + '</span><b id="cd">' + (countdownText(lockAt(k))||"") + '</b>') + '</div><div class="pad">';
+
+  html += '<div class="scope"><button class="' + (!scoreMode?'on':'') + '" onclick="setPredMode(\'outcome\')">Sonuç Tahmini</button><button class="' + (scoreMode?'on':'') + '" onclick="setPredMode(\'score\')">Skor Tahmini</button></div>';
 
   T.matches.forEach((m,i) => {
     const mine = picks[i], actual = res[i];
     const hit = actual !== null && mine !== null && actual === mine;
     const miss = actual !== null && mine !== null && actual !== mine;
-    html += '<div class="card"><div class="top"><div style="display:flex;align-items:center;gap:10px;min-width:0">' + teamLogo(m.oppTeam, "sm") + '<div style="min-width:0"><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div><div class="picks">';
-    PICKS.forEach(p => {
-      const sel = mine === p.v;
-      html += '<button class="' + (sel?'sel':'') + '"' + (lk?' disabled':'') + ' onclick="pick(\'' + k + '\',' + i + ',' + p.v + ')"><span class="v">' + p.v + '</span><span class="t">' + p.t + '</span></button>';
-    });
-    html += '</div>';
-    const pid = k + ':' + i, open = S.openMatch === pid;
-    if (hardLock) {
-      const votes = S.players.map(p => ({name:p.name, v:(p[k] || empty())[i]})).sort((x,y) => (y.v === null ? -1 : y.v) - (x.v === null ? -1 : x.v) || x.name.localeCompare(y.name,"tr"));
-      const cnt = v => votes.filter(x => x.v === v).length;
-      html += '<button class="peek" onclick="peek(\'' + pid + '\')"><span>Herkesin tahmini</span><span>3: ' + cnt(3) + ' · 1: ' + cnt(1) + ' · 0: ' + cnt(0) + (open ? ' ▴' : ' ▾') + '</span></button>';
-      if (open) {
-        html += '<div class="peekbody">';
-        if (!votes.length) html += '<div class="dist">Kimse tahmin girmemiş.</div>';
-        votes.forEach(x => { const right = actual !== null && x.v !== null && x.v === actual; html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv' + (right ? ' on' : '') + '">' + (x.v === null ? '·' : x.v) + '</span></div>'; });
-        html += '</div>';
-      }
-    } else html += '<div class="peek"><span>Herkesin tahmini</span><span>kilitten sonra açılır</span></div>';
+    html += '<div class="card"><div class="top"><div style="display:flex;align-items:center;gap:10px;min-width:0">' + teamLogo(m.oppTeam, "sm") + '<div style="min-width:0"><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div>';
+    if (scoreMode) {
+      html += scoreCardBody(T, m);
+    } else {
+      html += '<div class="picks">';
+      PICKS.forEach(p => {
+        const sel = mine === p.v;
+        html += '<button class="' + (sel?'sel':'') + '"' + (lk?' disabled':'') + ' onclick="pick(\'' + k + '\',' + i + ',' + p.v + ')"><span class="v">' + p.v + '</span><span class="t">' + p.t + '</span></button>';
+      });
+      html += '</div>';
+    }
+    html += everyoneGuessPanel(k, i, m, hardLock);
     html += '</div>';
   });
 
-  html += '</div><div class="bar"><div class="in"><div><div class="k">' + T.tla + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
+  html += '</div>';
+  if (!scoreMode) {
+    html += '<div class="bar"><div class="in"><div><div class="k">' + T.tla + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
+  }
   return html;
+}
+
+// Skor tahmini sıralaması ana sıralamadan bağımsız: gs/fb kapsamı ayrımı
+// yok, sonuçlanmış (fixtures.home_goals/away_goals dolu) her iki takımın
+// maçı da tek havuzda toplanıyor.
+function scoreStandingsRows() {
+  const finishedMatches = [].concat(TEAMS.gs.matches || [], TEAMS.fb.matches || [])
+    .filter(m => m.id && m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null);
+  const rows = (S.players || []).map(p => {
+    let points = 0, exact = 0, diff = 0;
+    finishedMatches.forEach(m => {
+      const guess = S.scorePreds.get(m.id)?.get(p.id);
+      const pts = guess ? scoreMatchPrediction(guess.home, guess.away, m.homeGoals, m.awayGoals) : 0;
+      if (pts === 5) exact++;
+      else if (pts === 3) diff++;
+      points += pts || 0;
+    });
+    return Object.assign({}, p, { points, exact, diff });
+  });
+  rows.sort(compareScorePredictionRows);
+  return { rows, played:finishedMatches.length };
 }
 
 function boardView() {
@@ -689,7 +958,7 @@ function boardView() {
   let html = '<div class="pad"><div class="scope">';
   [["gs","Galatasaray"],["fb","Fenerbahçe"]].forEach(o => { html += '<button class="' + (S.scope === o[0] ? 'on' : '') + '" onclick="setScope(\'' + o[0] + '\')">' + o[1] + '</button>'; });
   html += '</div><div class="hero"><div><div class="k lbl" style="margin:0">' + TEAMS[st.scope].name + ' kaç puan topladı</div><div class="meta" style="margin-top:6px">' + st.played + '/' + st.total + ' maç girildi' + (st.finished ? ' · tamamlandı' : '') + '</div></div><div class="tot">' + st.at + '</div></div>';
-  html += '<div class="rowhead"><h2 class="sec">Sıralama</h2><button class="ghost" onclick="refresh()">Yenile</button></div><p class="meta" style="margin:-4px 0 14px">' + (st.played ? (st.finished ? 'Toplam puanı tam tutturan kazanır. Tutturan yoksa en çok yaklaşan kazanmış sayılır.' : 'Sezon devam ederken daha çok maçı doğru bilen üstte. Kesin sonuç 8 maç bitince toplam puan farkına göre belli olur.') : 'Maçlar oynandıkça sıralama burada oluşacak.') + '</p>';
+  html += '<div class="rowhead"><span class="sec-wrap"><h2 class="sec">Sıralama</h2><button class="qmark" onclick="openRules(\'tahmin\')" aria-label="Oyun kuralları">?</button></span><button class="ghost" onclick="refresh()">Yenile</button></div><p class="meta" style="margin:-4px 0 14px">' + (st.played ? (st.finished ? 'Toplam puanı tam tutturan kazanır. Tutturan yoksa en çok yaklaşan kazanmış sayılır.' : 'Sezon devam ederken daha çok maçı doğru bilen üstte. Kesin sonuç 8 maç bitince toplam puan farkına göre belli olur.') : 'Maçlar oynandıkça sıralama burada oluşacak.') + '</p>';
 
   if (!st.rows.length) html += '<p class="meta" style="margin-bottom:32px">Henüz kimse katılmadı.</p>';
   else {
@@ -723,21 +992,45 @@ function boardView() {
     html += '<div style="height:12px"></div>';
   }
 
+  const sst = scoreStandingsRows();
+  html += '<div class="rowhead" style="margin-top:26px"><span class="sec-wrap"><h2 class="sec">Skor Tahmini Sıralaması</h2><button class="qmark" onclick="openRules(\'skor\')" aria-label="Oyun kuralları">?</button></span></div><p class="meta" style="margin:-4px 0 12px">' + (sst.played ? 'Tam skoru bilen en çok puanı alır. Eşitlikte tam skor sayısı, sonra doğru averaj sayısı belirleyici.' : 'Sonuçlanan maç olunca burada sıralama oluşacak.') + '</p>';
+  if (!sst.played || !sst.rows.length) html += '<p class="meta" style="margin-bottom:24px">Henüz veri yok.</p>';
+  else {
+    sst.rows.forEach((p,i) => {
+      const mine = S.me && p.id === S.me.id;
+      html += '<div class="srow' + (mine?' me':'') + '"><span class="pos' + (i===0?' first':'') + '">' + (i+1) + '</span><span class="sn">' + esc(p.name) + (mine?' (sen)':'') + '</span><span class="sv">' + p.points + '<small>puan</small></span><span class="sv">' + p.exact + '<small>tam skor</small></span></div>';
+    });
+    html += '<div style="height:20px"></div>';
+  }
+
   html += '<div class="rowhead"><h2 class="sec">Maç sonuçları</h2>' + (admin ? '<button class="ghost" onclick="toggleEdit()">' + (S.editing ? 'Girişi kapat' : 'Sonuç gir') + '</button>' : '') + '</div>' + (admin && S.editing ? '<button class="wipe" onclick="clearAllScores()">Bütün skorları sil</button>' : '') + '<p class="meta" style="margin:0 0 16px">' + (admin ? 'Maçın yanındaki Gir düğmesine bas, skoru yaz. Puan otomatik hesaplanır.' : 'Skorları yalnızca yarışma yöneticisi giriyor.') + '</p>';
 
   ["gs","fb"].forEach(k => {
     html += '<div style="margin-bottom:20px"><div class="lbl" style="color:' + TEAMS[k].theme.accent + ';display:flex;align-items:center;gap:8px">' + teamLogo(TEAMS[k], "sm") + '<span>' + TEAMS[k].name + '</span></div>';
     TEAMS[k].matches.forEach((m,i) => {
       const done = Date.now() >= new Date(m.iso).getTime(), v = S.results[k][i], sc = (S.scores[k] || empty())[i], dk = k + ':' + i, editing = admin && S.editing && S.editRow === dk;
+      // sc her zaman "takım-rakip" sırasında saklanır (bkz. saveScore), ama
+      // ekranda gerçek maç sırasıyla (ev önce) gösteriliyor — takım sekmesindeki
+      // skor tahmini kutularıyla aynı okunuş için.
+      const oppTla = (m.oppTeam && m.oppTeam.tla) ? m.oppTeam.tla : String(m.opp || "?").slice(0, 3).toUpperCase();
+      const homeTla = m.home ? TEAMS[k].tla : oppTla, awayTla = m.home ? oppTla : TEAMS[k].tla;
       html += '<div class="res' + (editing ? ' col' : '') + '">' + teamLogo(m.oppTeam, "sm") + '<div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
       if (editing) {
-        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].tla + '" value="' + (sc ? sc[0] : '') + '"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + (sc ? sc[1] : '') + '"></div>';
-        const cur = S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null ? S.ptDraft[dk] : v;
-        html += '<div class="pts">';
-        PICKS.forEach(pp => { const on = cur === pp.v; html += '<button onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
+        const draft = S.scoreDraft[dk];
+        const hVal = draft ? draft[0] : (sc ? (m.home ? sc[0] : sc[1]) : '');
+        const aVal = draft ? draft[1] : (sc ? (m.home ? sc[1] : sc[0]) : '');
+        html += '<div class="sc">' +
+          '<div class="scbox"><input id="sh_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(hVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(homeTla) + '</span></div>' +
+          '<span class="sep">-</span>' +
+          '<div class="scbox"><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(awayTla) + '</span></div>' +
+        '</div>';
+        const cur = currentPoint(k, i);
+        html += '<div class="pts" id="pts_' + dk + '">';
+        PICKS.forEach(pp => { const on = cur === pp.v; html += '<button data-pv="' + pp.v + '" onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
         html += '<button class="ok" onclick="saveScore(\'' + k + '\',' + i + ')">Kaydet</button><button class="cancel" onclick="closeRow(\'' + k + '\',' + i + ')">Vazgeç</button></div>';
       } else {
-        html += '<div class="done">' + (sc ? '<span class="skor">' + sc[0] + '-' + sc[1] + '</span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
+        const homeVal = sc ? (m.home ? sc[0] : sc[1]) : null, awayVal = sc ? (m.home ? sc[1] : sc[0]) : null;
+        html += '<div class="done">' + (sc ? '<span class="skor"><small>' + esc(homeTla) + '</small>' + homeVal + '-' + awayVal + '<small>' + esc(awayTla) + '</small></span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
       }
       html += '</div>';
     });
@@ -748,6 +1041,36 @@ function boardView() {
   return html;
 }
 
+function rulesSectionTahmin(withTopMargin) {
+  return '<section id="sec-tahmin"' + (withTopMargin ? ' style="margin-top:32px"' : '') + '><h2 class="sec">Tahmin Ligi</h2>' +
+    '<p class="rules-p">Her maç için o maçtan alınacak puanı tahmin edersin: galibiyet 3, beraberlik 1, mağlubiyet 0. Tahminler o takımın ilk maçından bir saat önce kilitlenir ve sonra değiştirilemez. Kazanan, takımın 8 maçta topladığı gerçek toplama en yakın tahmini yapan kişidir. Eşitlik olursa maç bazında daha çok doğru bilen öne geçer, o da eşitse tahminini önce kesinleştiren. Kilitten önce kimse başkasının tahminini göremez.</p>' +
+  '</section>';
+}
+
+function rulesSectionSkor(withTopMargin) {
+  return '<section id="sec-skor"' + (withTopMargin ? ' style="margin-top:32px"' : '') + '><h2 class="sec">Skor Tahmini</h2>' +
+    '<p class="rules-p">Maçın skorunu tahmin edersin. Her maç kendi başlangıç saatinde kilitlenir.</p>' +
+    '<table class="rules-table">' +
+      '<tr><td>Tam skor</td><td>5</td></tr>' +
+      '<tr><td>Doğru kazanan + doğru gol farkı</td><td>3</td></tr>' +
+      '<tr><td>Sadece doğru kazanan</td><td>1</td></tr>' +
+      '<tr><td>Yanlış yön</td><td>0</td></tr>' +
+    '</table>' +
+    '<p class="rules-p">Beraberlik tahminleri 3\'lük kademeye girmez — her beraberliğin gol farkı zaten sıfır olduğu için 3 vermek "berabere" demeyi sistematik olarak avantajlı hale getirirdi; tam skoru tutturan beraberlik yine 5 alır. Bu sıralama ana yarışmayı etkilemez, ayrı tutulur.</p>' +
+  '</section>';
+}
+
+// S.rulesSection "tahmin"/"skor" ise yalnızca o bölüm gösterilir (Sıralama
+// sekmesindeki ? düğmeleri); değilse (hesap menüsünden açılınca) ikisi de,
+// dikey olarak, kaydırmayla okunacak şekilde.
+function rulesScreen() {
+  let body;
+  if (S.rulesSection === "tahmin") body = rulesSectionTahmin(false);
+  else if (S.rulesSection === "skor") body = rulesSectionSkor(false);
+  else body = rulesSectionTahmin(false) + rulesSectionSkor(true);
+  return '<div class="wrap"><header><h1>Oyun kuralları</h1><button class="out" onclick="closeRules()">Kapat</button></header><div class="pad">' + body + '</div></div>';
+}
+
 function render() {
   theme();
   if (S.legacyClaimOpen) return;
@@ -755,6 +1078,7 @@ function render() {
   if (S.loading) { app.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--dim)">Yükleniyor…</div>'; return; }
   if (S.authMode === "reset" || !S.user || !S.me) { app.innerHTML = authScreen(); return; }
   if (!S.me.name) { app.innerHTML = nameScreen(); return; }
+  if (S.rulesOpen) { app.innerHTML = rulesScreen(); return; }
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
   let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><div class="acct"><button id="acctBtn" class="out" aria-haspopup="true" aria-expanded="' + (S.accountMenuOpen ? 'true' : 'false') + '" aria-controls="acctMenuPanel" onclick="toggleAccountMenu()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + '</button>' + accountMenu() + '</div></header><nav>';
@@ -769,9 +1093,10 @@ function render() {
 Object.assign(window, {
   S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
   saveDisplayName, locked,
-  pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
+  pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt, onScoreInput,
+  setPredMode, saveScorePick,
   openRow, closeRow, setScope, peek, toggleEdit, refresh,
-  toggleAccountMenu, closeAccountMenu, openLegacyClaim,
+  toggleAccountMenu, closeAccountMenu, openLegacyClaim, openRules, closeRules,
   teamLogoFallback
 });
 
