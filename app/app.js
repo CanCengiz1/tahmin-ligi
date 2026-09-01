@@ -981,18 +981,26 @@ function boardView() {
     html += '<div style="margin-bottom:20px"><div class="lbl" style="color:' + TEAMS[k].theme.accent + ';display:flex;align-items:center;gap:8px">' + teamLogo(TEAMS[k], "sm") + '<span>' + TEAMS[k].name + '</span></div>';
     TEAMS[k].matches.forEach((m,i) => {
       const done = Date.now() >= new Date(m.iso).getTime(), v = S.results[k][i], sc = (S.scores[k] || empty())[i], dk = k + ':' + i, editing = admin && S.editing && S.editRow === dk;
+      // Skor kutuları hep "kendi takımı - rakip" sırasında; kart başlığında
+      // yalnızca rakip adı var, o yüzden kutuların altına takım kısaltmasını
+      // yazmadan "1-2" hangi tarafın olduğu belirsiz kalıyor.
+      const oppTla = (m.oppTeam && m.oppTeam.tla) ? m.oppTeam.tla : String(m.opp || "?").slice(0, 3).toUpperCase();
       html += '<div class="res' + (editing ? ' col' : '') + '">' + teamLogo(m.oppTeam, "sm") + '<div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
       if (editing) {
         const draft = S.scoreDraft[dk];
         const fVal = draft ? draft[0] : (sc ? sc[0] : '');
         const aVal = draft ? draft[1] : (sc ? sc[1] : '');
-        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].tla + '" value="' + esc(fVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"></div>';
+        html += '<div class="sc">' +
+          '<div class="scbox"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(fVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(TEAMS[k].tla) + '</span></div>' +
+          '<span class="sep">-</span>' +
+          '<div class="scbox"><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" value="' + esc(aVal) + '" oninput="onScoreInput(\'' + k + '\',' + i + ')"><span class="scl">' + esc(oppTla) + '</span></div>' +
+        '</div>';
         const cur = currentPoint(k, i);
         html += '<div class="pts" id="pts_' + dk + '">';
         PICKS.forEach(pp => { const on = cur === pp.v; html += '<button data-pv="' + pp.v + '" onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
         html += '<button class="ok" onclick="saveScore(\'' + k + '\',' + i + ')">Kaydet</button><button class="cancel" onclick="closeRow(\'' + k + '\',' + i + ')">Vazgeç</button></div>';
       } else {
-        html += '<div class="done">' + (sc ? '<span class="skor">' + sc[0] + '-' + sc[1] + '</span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
+        html += '<div class="done">' + (sc ? '<span class="skor"><small>' + esc(TEAMS[k].tla) + '</small>' + sc[0] + '-' + sc[1] + '<small>' + esc(oppTla) + '</small></span>' : '') + '<span class="val" style="' + (v===null?'color:var(--dim)':'') + '">' + (v===null ? (done?'—':'·') : v) + '</span>' + (admin && S.editing ? (v === null ? '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Gir</button>' : '<button class="mini" onclick="openRow(\'' + k + '\',' + i + ')">Düzenle</button><button class="mini del" onclick="clearScore(\'' + k + '\',' + i + ')">Sil</button>') : '') + '</div>';
       }
       html += '</div>';
     });
