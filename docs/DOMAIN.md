@@ -28,14 +28,27 @@ veri: hangi takım, hangi maç, kaç kaç bitti.
 ### teams
 
 ```
-id            uuid pk
-name          text          Galatasaray
-short_name    text          GS
-slug          text unique   galatasaray
-country_code  text          TR
-crest_url     text          (opsiyonel, telif dikkat)
-active        boolean
+id               uuid pk
+name             text          Galatasaray
+short_name       text          GS
+slug             text unique   galatasaray
+country_code     text          TR
+crest_url        text          (opsiyonel, telif dikkat)
+primary_color    text          hex — #A90432
+secondary_color  text          hex — #F5A800
+active           boolean
 ```
+
+`primary_color`/`secondary_color` `0009_teams_brand_colors.sql` ile eklendi
+— `0007_domain_model.sql`'in ilk hâli bu iki sütunu tanımlamıyordu ama
+`0008_seed_reference_data.sql` onlara zaten yazıyordu, bu belge de o ara
+`colors jsonb` diye yanlış dokümante etmişti.
+
+`app/app.js` içindeki `TEAMS` sabiti (artık `loadTeamsFromDB()` ile bu
+tablodan dolduruluyor) bu satırın bugünkü karşılığı — `crest` `crest_url`'e,
+`colors:[primary,secondary]` bu iki sütuna, `tla` ise `short_name`'e karşılık
+gelir (bkz. `docs/ASSETS.md`). Geçiş, alan adı eşlemesi dışında ek dönüşüm
+gerektirmeyecek şekilde tasarlandı.
 
 ### competitions
 
@@ -286,6 +299,11 @@ Kaynak: `app/app.js` içindeki `TEAMS` sabiti.
 
 **5. Frontend adım adım geçer.** Önce okuma yeni tablolardan, yazma hâlâ
 eskiye. Doğrulandıktan sonra yazma da geçer.
+
+> Kısmen tamamlandı: `app/app.js` artık takım adı/tla/renk ve fikstürü
+> `teams`/`fixtures`'tan okuyor (`loadTeamsFromDB()`). Tahmin ve sonuç
+> okuma/yazma hâlâ tamamen `team_predictions` / `team_results` üzerinde —
+> bu adımın geri kalanı henüz yapılmadı.
 
 **6. Eski tablolar bırakılır.** `team_predictions`, `team_results`,
 `team_locks` düşürülür.

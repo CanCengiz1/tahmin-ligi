@@ -1,9 +1,14 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
-import { empty, standings, confirmedAt, revealedTeams } from "./scoring.js";
+import { empty, standings, confirmedAt, revealedTeams, MATCH_COUNT } from "./scoring.js";
 
-const TEAMS = {
+// Son çare listesi: teams/fixtures sorgusu başarısız olursa (ağ, RLS, boş
+// sezon) uygulama boş ekran yerine bununla açılır. loadTeamsFromDB()
+// çözülene kadar da ilk boyama bununla yapılır, böylece kullanıcı hiçbir
+// zaman yüklenmeyi beklemez. Rakip takımların rengi/forması burada yok —
+// bu durumda teamLogo() "?" rozetine düşer, bu beklenen bir davranış.
+const FALLBACK_TEAMS = {
   gs: {
-    key:"gs", name:"Galatasaray", short:"GS",
+    key:"gs", name:"Galatasaray", tla:"GS", crest:null, colors:["#A90432","#F5A800"],
     lock:"2026-09-09T19:00:00Z",
     theme:{bg:"#12100B",panel:"#1C1810",line:"#3A3120",accent:"#F5A800",text:"#F6EEDC",dim:"#9A8F76"},
     matches:[
@@ -18,7 +23,7 @@ const TEAMS = {
     ]
   },
   fb: {
-    key:"fb", name:"Fenerbahçe", short:"FB",
+    key:"fb", name:"Fenerbahçe", tla:"FB", crest:null, colors:["#12356E","#FFE500"],
     lock:"2026-09-10T19:00:00Z",
     theme:{bg:"#080D18",panel:"#101828",line:"#20304C",accent:"#FFE500",text:"#E8EFFA",dim:"#7C8CA6"},
     matches:[
@@ -33,6 +38,89 @@ const TEAMS = {
     ]
   }
 };
+
+// Tek ligli davranış korunuyor: takip edilen tek iki takım hâlâ bunlar.
+// team_predictions/team_results hâlâ bu iki anahtarla (gs/fb) çalışıyor.
+const TRACKED_SLUGS = { galatasaray:"gs", fenerbahce:"fb" };
+const TEAM_THEME = {
+  gs:{bg:"#12100B",panel:"#1C1810",line:"#3A3120",text:"#F6EEDC",dim:"#9A8F76"},
+  fb:{bg:"#080D18",panel:"#101828",line:"#20304C",text:"#E8EFFA",dim:"#7C8CA6"}
+};
+const TR_MONTHS_SHORT = ["Oca","Şub","Mar","Nis","May","Haz","Tem","Ağu","Eyl","Eki","Kas","Ara"];
+const fmtMatchDay = iso => { const d = new Date(iso); return d.getUTCDate() + " " + TR_MONTHS_SHORT[d.getUTCMonth()]; };
+
+function dbTeamToLogoTeam(row) {
+  if (!row) return null;
+  return {
+    name: row.name,
+    tla: row.short_name,
+    crest: row.crest_url || null,
+    colors: row.primary_color && row.secondary_color ? [row.primary_color, row.secondary_color] : null
+  };
+}
+
+// Fikstür verisi nadiren değiştiği için bir kez çekilip bellekte tutulur;
+// sonraki çağrılar aynı promise'i paylaşır, tekrar sorgu atılmaz.
+let teamsLoadPromise = null;
+function ensureTeamsLoaded() {
+  if (!supabase) return Promise.resolve();
+  if (!teamsLoadPromise) {
+    teamsLoadPromise = loadTeamsFromDB()
+      .then(loaded => { TEAMS = loaded; render(); })
+      .catch(e => { console.error("Takım/fikstür verisi DB'den alınamadı, sabit listeyle devam ediliyor.", e); });
+  }
+  return teamsLoadPromise;
+}
+
+async function loadTeamsFromDB() {
+  const { data:season, error:seasonError } = await supabase
+    .from("competition_seasons")
+    .select("id, competitions!inner(slug)")
+    .eq("competitions.slug", "ucl")
+    .in("status", ["upcoming", "active"])
+    .order("starts_at", { ascending:false })
+    .limit(1)
+    .maybeSingle();
+  if (seasonError) throw seasonError;
+  if (!season) throw new Error("Aktif UCL sezonu bulunamadı.");
+
+  const teamCols = "slug,name,short_name,crest_url,primary_color,secondary_color";
+  const [{ data:teamRows, error:teamsError }, { data:fixtureRows, error:fixturesError }] = await Promise.all([
+    supabase.from("teams").select(teamCols).in("slug", Object.keys(TRACKED_SLUGS)),
+    supabase.from("fixtures")
+      .select("kickoff_at,home:home_team_id(" + teamCols + "),away:away_team_id(" + teamCols + ")")
+      .eq("competition_season_id", season.id)
+      .order("kickoff_at", { ascending:true })
+  ]);
+  if (teamsError) throw teamsError;
+  if (fixturesError) throw fixturesError;
+
+  const teamBySlug = new Map((teamRows || []).map(r => [r.slug, r]));
+  const byKey = { gs:[], fb:[] };
+  (fixtureRows || []).forEach(row => {
+    const homeKey = TRACKED_SLUGS[row.home?.slug], awayKey = TRACKED_SLUGS[row.away?.slug];
+    if (homeKey) byKey[homeKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.away?.name || "?", home:true, oppTeam:dbTeamToLogoTeam(row.away) });
+    if (awayKey) byKey[awayKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.home?.name || "?", home:false, oppTeam:dbTeamToLogoTeam(row.home) });
+  });
+
+  const built = {};
+  for (const [slug, key] of Object.entries(TRACKED_SLUGS)) {
+    const team = teamBySlug.get(slug);
+    const matches = byKey[key].sort((a, b) => new Date(a.iso) - new Date(b.iso));
+    if (!team || matches.length !== MATCH_COUNT) throw new Error("Eksik fikstür verisi: " + slug);
+    const colors = team.primary_color && team.secondary_color ? [team.primary_color, team.secondary_color] : null;
+    built[key] = {
+      key, name:team.name, tla:team.short_name, crest:team.crest_url || null, colors,
+      lock:matches[0].iso,
+      theme:Object.assign({ accent: colors ? colors[1] : NEUTRAL.accent }, TEAM_THEME[key]),
+      matches
+    };
+  }
+  return built;
+}
+
+// DB'den yüklenene kadar (ve yükleme başarısız olursa) sabit listeyle çalışılır.
+let TEAMS = FALLBACK_TEAMS;
 
 const NEUTRAL = {bg:"#0B0D10",panel:"#14181E",line:"#252C36",accent:"#C8D2E0",text:"#EDF1F6",dim:"#7D8794"};
 const ART = '<svg class="shake" viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="İki kişi el ele tutuşuyor"><defs><pattern id="gsp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#A90432"/><rect width="8" height="18" fill="#F5A800"/></pattern><pattern id="fbp" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#12356E"/><rect width="8" height="18" fill="#FFE500"/></pattern></defs><circle cx="100" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 79,44 A 21,21 0 0 1 121,44 Z" fill="#2A2117"/><rect x="92" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 68,90 L 56,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 132,90 L 145,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="74" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="79" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="106" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="59" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="124" y="68" width="17" height="24" rx="8" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><rect x="72" y="66" width="56" height="66" rx="12" fill="url(#gsp)" stroke="#0B0D10" stroke-width="3"/><circle cx="200" cy="46" r="21" fill="#E9D9BE" stroke="#0B0D10" stroke-width="3"/><path d="M 179,44 A 21,21 0 0 1 221,44 Z" fill="#2A2117"/><rect x="192" y="60" width="16" height="14" fill="#E9D9BE"/><path d="M 232,90 L 244,120" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><path d="M 168,90 L 155,116" stroke="#E9D9BE" stroke-width="13" stroke-linecap="round" fill="none"/><rect x="174" y="124" width="52" height="28" rx="6" fill="#191E26"/><rect x="179" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="206" y="148" width="15" height="34" rx="7" fill="#E9D9BE"/><rect x="159" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="224" y="68" width="17" height="24" rx="8" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><rect x="172" y="66" width="56" height="66" rx="12" fill="url(#fbp)" stroke="#0B0D10" stroke-width="3"/><circle cx="150" cy="115" r="12" fill="#F3EBDA" stroke="#0B0D10" stroke-width="3"/></svg>';
@@ -57,6 +145,59 @@ const normName = n => String(n || "").trim().replace(/\s+/g, " ");
 function normalizePicks(value) {
   if (!Array.isArray(value) || value.length !== 8) return empty();
   return value.map(v => (v === 0 || v === 1 || v === 3) ? v : null);
+}
+
+// teamLogo(team, size) — tek giriş noktası. team null/eksikse ya da renkleri
+// bilinmiyorsa "?" rozetine düşer; bu, rakip takımlar için crest verisi
+// tutulmadığı sürece beklenen sonuçtur.
+const LOGO_SIZES = { sm:26, md:38, lg:48 };
+
+function relLuminance(hex) {
+  const h = String(hex || "").replace("#", "");
+  if (h.length !== 6) return 0;
+  const lin = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  const [r, g, b] = [0, 2, 4].map(i => lin(parseInt(h.slice(i, i + 2), 16) / 255));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+// Sabit bir renk yerine hesaplanır: iki rengin ortalama parlaklığına göre
+// beyaz ya da koyu metin seçilir, böylece keyfi renk çiftlerinde de okunur.
+function contrastTextColor(colors) {
+  const avg = colors.reduce((sum, hex) => sum + relLuminance(hex), 0) / colors.length;
+  return avg > 0.45 ? "#0B0D10" : "#FFFFFF";
+}
+
+function teamMonogram(tla, colors, px) {
+  const style = "width:" + px + "px;height:" + px + "px;font-size:" + Math.round(px * 0.36) + "px";
+  if (!colors) return '<span class="tlogo tlogo-unknown" style="' + style + '">?</span>';
+  const label = esc(String(tla || "?").slice(0, 4).toUpperCase());
+  const [c1, c2] = colors;
+  const ink = contrastTextColor(colors);
+  return '<span class="tlogo" style="' + style + ';background:linear-gradient(135deg,' + esc(c1) + ' 50%,' + esc(c2) + ' 50%);color:' + ink + '">' + label + '</span>';
+}
+
+// <img> yüklenemezse (kırık resim ikonu asla görünmemeli) veriyi data-* ile
+// taşıyıp aynı boyutta monograma sessizce düşer.
+function teamLogoFallback(img) {
+  const host = img.closest(".tlogo");
+  if (!host) return;
+  const px = parseInt(img.dataset.px, 10) || LOGO_SIZES.md;
+  const tla = img.dataset.tla || "";
+  const colors = img.dataset.c1 && img.dataset.c2 ? [img.dataset.c1, img.dataset.c2] : null;
+  host.outerHTML = teamMonogram(tla, colors, px);
+}
+
+function teamLogo(team, size) {
+  const px = LOGO_SIZES[size] || LOGO_SIZES.md;
+  const tla = team && team.tla ? String(team.tla).slice(0, 4) : "";
+  const colors = team && Array.isArray(team.colors) && team.colors.length === 2 ? team.colors : null;
+  if (team && team.crest) {
+    return '<span class="tlogo tlogo-crest" style="width:' + px + 'px;height:' + px + 'px">' +
+      '<img src="' + esc(team.crest) + '" alt="' + esc(tla || team.name || "Takım") + '" loading="lazy" ' +
+      'data-tla="' + esc(tla) + '" data-c1="' + esc(colors ? colors[0] : "") + '" data-c2="' + esc(colors ? colors[1] : "") + '" data-px="' + px + '" ' +
+      'onerror="teamLogoFallback(this)"></span>';
+  }
+  return teamMonogram(tla, colors, px);
 }
 
 async function pull() {
@@ -518,7 +659,7 @@ function teamView(k) {
     const mine = picks[i], actual = res[i];
     const hit = actual !== null && mine !== null && actual === mine;
     const miss = actual !== null && mine !== null && actual !== mine;
-    html += '<div class="card"><div class="top"><div><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div><div class="picks">';
+    html += '<div class="card"><div class="top"><div style="display:flex;align-items:center;gap:10px;min-width:0">' + teamLogo(m.oppTeam, "sm") + '<div style="min-width:0"><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div><div class="picks">';
     PICKS.forEach(p => {
       const sel = mine === p.v;
       html += '<button class="' + (sel?'sel':'') + '"' + (lk?' disabled':'') + ' onclick="pick(\'' + k + '\',' + i + ',' + p.v + ')"><span class="v">' + p.v + '</span><span class="t">' + p.t + '</span></button>';
@@ -539,7 +680,7 @@ function teamView(k) {
     html += '</div>';
   });
 
-  html += '</div><div class="bar"><div class="in"><div><div class="k">' + T.short + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
+  html += '</div><div class="bar"><div class="in"><div><div class="k">' + T.tla + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
   return html;
 }
 
@@ -559,7 +700,7 @@ function boardView() {
         html += '<div class="detail">';
         const shown = revealedTeams(mine, locked);
         ["gs","fb"].forEach(k => {
-          html += '<div style="padding-top:12px"><div class="lbl">' + TEAMS[k].short + '</div>';
+          html += '<div style="padding-top:12px"><div class="lbl">' + TEAMS[k].tla + '</div>';
           if (shown.includes(k)) {
             html += '<div class="strip8">';
             (p[k] || empty()).forEach((v,j) => { const a = S.results[k][j], hit = a !== null && v !== null && a === v; html += '<div style="' + (hit ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : (v===null?'color:var(--dim)':'')) + '">' + (v===null?'·':v) + '</div>'; });
@@ -585,12 +726,12 @@ function boardView() {
   html += '<div class="rowhead"><h2 class="sec">Maç sonuçları</h2>' + (admin ? '<button class="ghost" onclick="toggleEdit()">' + (S.editing ? 'Girişi kapat' : 'Sonuç gir') + '</button>' : '') + '</div>' + (admin && S.editing ? '<button class="wipe" onclick="clearAllScores()">Bütün skorları sil</button>' : '') + '<p class="meta" style="margin:0 0 16px">' + (admin ? 'Maçın yanındaki Gir düğmesine bas, skoru yaz. Puan otomatik hesaplanır.' : 'Skorları yalnızca yarışma yöneticisi giriyor.') + '</p>';
 
   ["gs","fb"].forEach(k => {
-    html += '<div style="margin-bottom:20px"><div class="lbl" style="color:' + TEAMS[k].theme.accent + '">' + TEAMS[k].name + '</div>';
+    html += '<div style="margin-bottom:20px"><div class="lbl" style="color:' + TEAMS[k].theme.accent + ';display:flex;align-items:center;gap:8px">' + teamLogo(TEAMS[k], "sm") + '<span>' + TEAMS[k].name + '</span></div>';
     TEAMS[k].matches.forEach((m,i) => {
       const done = Date.now() >= new Date(m.iso).getTime(), v = S.results[k][i], sc = (S.scores[k] || empty())[i], dk = k + ':' + i, editing = admin && S.editing && S.editRow === dk;
-      html += '<div class="res' + (editing ? ' col' : '') + '"><div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
+      html += '<div class="res' + (editing ? ' col' : '') + '">' + teamLogo(m.oppTeam, "sm") + '<div class="n"><div>' + esc(m.opp) + '</div><div>' + m.d + ' · ' + (m.home?'İç saha':'Deplasman') + '</div></div>';
       if (editing) {
-        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].short + '" value="' + (sc ? sc[0] : '') + '"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + (sc ? sc[1] : '') + '"></div>';
+        html += '<div class="sc"><input id="sf_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="' + TEAMS[k].tla + '" value="' + (sc ? sc[0] : '') + '"><span>-</span><input id="sa_' + k + '_' + i + '" inputmode="numeric" maxlength="2" placeholder="Rk" value="' + (sc ? sc[1] : '') + '"></div>';
         const cur = S.ptDraft[dk] !== undefined && S.ptDraft[dk] !== null ? S.ptDraft[dk] : v;
         html += '<div class="pts">';
         PICKS.forEach(pp => { const on = cur === pp.v; html += '<button onclick="setPt(\'' + k + '\',' + i + ',' + pp.v + ')" style="' + (on ? 'background:' + TEAMS[k].theme.accent + ';color:#0B0D10;border-color:' + TEAMS[k].theme.accent : '') + '">' + pp.v + '</button>'; });
@@ -617,7 +758,7 @@ function render() {
 
   const tabs = [["gs","Galatasaray","#F5A800"],["fb","Fenerbahçe","#FFE500"],["board","Sıralama","#C8D2E0"]];
   let html = '<div class="wrap"><header><h1>Tahmin Ligi</h1><div class="acct"><button id="acctBtn" class="out" aria-haspopup="true" aria-expanded="' + (S.accountMenuOpen ? 'true' : 'false') + '" aria-controls="acctMenuPanel" onclick="toggleAccountMenu()">' + esc(S.me.name) + (S.admin ? ' · Admin' : '') + '</button>' + accountMenu() + '</div></header><nav>';
-  tabs.forEach(t => { const on = S.view === t[0]; html += '<button class="' + (on?'on':'') + '" style="color:' + (on?t[2]:'var(--dim)') + ';border-bottom-color:' + (on?t[2]:'transparent') + '" onclick="go(\'' + t[0] + '\')">' + t[1] + '</button>'; });
+  tabs.forEach(t => { const on = S.view === t[0]; const logo = TEAMS[t[0]] ? teamLogo(TEAMS[t[0]], "sm") : ""; html += '<button class="' + (on?'on':'') + '" style="color:' + (on?t[2]:'var(--dim)') + ';border-bottom-color:' + (on?t[2]:'transparent') + '" onclick="go(\'' + t[0] + '\')">' + logo + t[1] + '</button>'; });
   html += '</nav>';
   if (S.msg) html += '<div class="err">' + esc(S.msg) + '</div>';
   html += S.view === "board" ? boardView() : teamView(S.view);
@@ -630,7 +771,8 @@ Object.assign(window, {
   saveDisplayName, locked,
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
   openRow, closeRow, setScope, peek, toggleEdit, refresh,
-  toggleAccountMenu, closeAccountMenu, openLegacyClaim
+  toggleAccountMenu, closeAccountMenu, openLegacyClaim,
+  teamLogoFallback
 });
 
 if (supabase) {
@@ -668,6 +810,7 @@ function oauthRedirectError() {
   const redirectError = oauthRedirectError();
   if (redirectError) S.authMsg = "Google ile giriş tamamlanamadı: " + redirectError;
   render();
+  ensureTeamsLoaded();
   if (!supabase) { S.loading = false; render(); return; }
   try {
     const { data:{session}, error } = await supabase.auth.getSession();
