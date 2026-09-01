@@ -14,7 +14,7 @@ with gs_fixtures as (
   select
     f.id,
     (f.home_team_id = t.id) as team_is_home,
-    row_number() over (order by f.kickoff_at asc) - 1 as idx
+    (row_number() over (order by f.kickoff_at asc) - 1)::int as idx
   from fixtures f
   join teams t on t.slug = 'galatasaray'
   where f.home_team_id = t.id or f.away_team_id = t.id
@@ -37,7 +37,7 @@ with fb_fixtures as (
   select
     f.id,
     (f.home_team_id = t.id) as team_is_home,
-    row_number() over (order by f.kickoff_at asc) - 1 as idx
+    (row_number() over (order by f.kickoff_at asc) - 1)::int as idx
   from fixtures f
   join teams t on t.slug = 'fenerbahce'
   where f.home_team_id = t.id or f.away_team_id = t.id
