@@ -1,5 +1,5 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
-import { empty, standings, confirmedAt, revealedTeams, MATCH_COUNT } from "./scoring.js";
+import { empty, standings, confirmedAt, revealedTeams, MATCH_COUNT, scoreMatchPrediction, compareScorePredictionRows } from "./scoring.js";
 
 // Son çare listesi: teams/fixtures sorgusu başarısız olursa (ağ, RLS, boş
 // sezon) uygulama boş ekran yerine bununla açılır. loadTeamsFromDB()
@@ -88,7 +88,7 @@ async function loadTeamsFromDB() {
   const [{ data:teamRows, error:teamsError }, { data:fixtureRows, error:fixturesError }] = await Promise.all([
     supabase.from("teams").select(teamCols).in("slug", Object.keys(TRACKED_SLUGS)),
     supabase.from("fixtures")
-      .select("kickoff_at,home:home_team_id(" + teamCols + "),away:away_team_id(" + teamCols + ")")
+      .select("id,kickoff_at,home_goals,away_goals,home:home_team_id(" + teamCols + "),away:away_team_id(" + teamCols + ")")
       .eq("competition_season_id", season.id)
       .order("kickoff_at", { ascending:true })
   ]);
@@ -99,8 +99,11 @@ async function loadTeamsFromDB() {
   const byKey = { gs:[], fb:[] };
   (fixtureRows || []).forEach(row => {
     const homeKey = TRACKED_SLUGS[row.home?.slug], awayKey = TRACKED_SLUGS[row.away?.slug];
-    if (homeKey) byKey[homeKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.away?.name || "?", home:true, oppTeam:dbTeamToLogoTeam(row.away) });
-    if (awayKey) byKey[awayKey].push({ d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.home?.name || "?", home:false, oppTeam:dbTeamToLogoTeam(row.home) });
+    // id/homeGoals/awayGoals maçın gerçek ev/deplasman skorudur, takip edilen
+    // takıma göre değil — score_predictions.home_score/away_score ve
+    // scoreMatchPrediction ile aynı anlamda kullanılıyor.
+    if (homeKey) byKey[homeKey].push({ id:row.id, d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.away?.name || "?", home:true, oppTeam:dbTeamToLogoTeam(row.away), homeGoals:row.home_goals, awayGoals:row.away_goals });
+    if (awayKey) byKey[awayKey].push({ id:row.id, d:fmtMatchDay(row.kickoff_at), iso:row.kickoff_at, opp:row.home?.name || "?", home:false, oppTeam:dbTeamToLogoTeam(row.home), homeGoals:row.home_goals, awayGoals:row.away_goals });
   });
 
   const built = {};
@@ -137,7 +140,8 @@ const S = {
   players:[], results:{gs:empty(),fb:empty()}, scores:{gs:empty(),fb:empty()},
   open:null, editing:false, msg:"", loading:true, openMatch:null, ptDraft:{}, editRow:null, scope:"gs",
   authMode:"login", authBusy:false, authMsg:"", legacyClaimOpen:false,
-  accountMenuOpen:false, signOutBusy:false
+  accountMenuOpen:false, signOutBusy:false,
+  predMode:"outcome", scorePreds:new Map()
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -202,14 +206,16 @@ function teamLogo(team, size) {
 
 async function pull() {
   if (!supabase || !S.user) return;
-  const [profilesRes, predictionsRes, resultsRes] = await Promise.all([
+  const [profilesRes, predictionsRes, resultsRes, scoreRes] = await Promise.all([
     supabase.from("profiles").select("id,display_name"),
     supabase.from("team_predictions").select("user_id,team_key,picks,confirmed_at,updated_at"),
-    supabase.from("team_results").select("team_key,points,scores")
+    supabase.from("team_results").select("team_key,points,scores"),
+    supabase.from("score_predictions").select("user_id,fixture_id,home_score,away_score")
   ]);
   if (profilesRes.error) throw profilesRes.error;
   if (predictionsRes.error) throw predictionsRes.error;
   if (resultsRes.error) throw resultsRes.error;
+  if (scoreRes.error) throw scoreRes.error;
 
   const byId = new Map();
   for (const profile of profilesRes.data || []) {
@@ -239,6 +245,12 @@ async function pull() {
     S.results[row.team_key] = normalizePicks(row.points);
     S.scores[row.team_key] = Array.isArray(row.scores) && row.scores.length === 8 ? row.scores : empty();
   }
+
+  S.scorePreds = new Map();
+  for (const row of scoreRes.data || []) {
+    if (!S.scorePreds.has(row.fixture_id)) S.scorePreds.set(row.fixture_id, new Map());
+    S.scorePreds.get(row.fixture_id).set(row.user_id, { home:row.home_score, away:row.away_score });
+  }
 }
 
 async function savePrediction(team) {
@@ -257,6 +269,27 @@ async function savePrediction(team) {
     console.error(e);
     S.msg = /row-level security/i.test(String(e?.message || e))
       ? "Bu tahmin artık değiştirilemiyor. Tahmin süresi dolmuş olabilir."
+      : (e.message || String(e));
+    return false;
+  }
+}
+
+async function saveScorePrediction(fixtureId, home, away) {
+  if (!supabase || !S.user) return false;
+  try {
+    const { error } = await supabase.from("score_predictions").upsert({
+      user_id:S.user.id,
+      fixture_id:fixtureId,
+      home_score:home,
+      away_score:away,
+      updated_at:new Date().toISOString()
+    }, { onConflict:"user_id,fixture_id" });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error(e);
+    S.msg = /row-level security/i.test(String(e?.message || e))
+      ? "Bu skor tahmini artık değiştirilemiyor. Maç başlamış olabilir."
       : (e.message || String(e));
     return false;
   }
@@ -510,6 +543,24 @@ async function editTeam(team) {
   if (!(await savePrediction(team))) { S.msg = S.msg || "Kaydedilemedi."; render(); }
 }
 
+function setPredMode(v) { S.predMode = v === "score" ? "score" : "outcome"; render(); }
+
+async function saveScorePick(fixtureId) {
+  if (!S.user) return;
+  const h = parseInt(String(document.getElementById("sh_" + fixtureId)?.value || "").trim(), 10);
+  const a = parseInt(String(document.getElementById("sa_" + fixtureId)?.value || "").trim(), 10);
+  if (!(h >= 0 && h <= 99) || !(a >= 0 && a <= 99)) { S.msg = "Skoru iki sayı olarak gir (0-99)."; render(); return; }
+  S.msg = ""; render();
+  const ok = await saveScorePrediction(fixtureId, h, a);
+  if (ok) {
+    if (!S.scorePreds.has(fixtureId)) S.scorePreds.set(fixtureId, new Map());
+    S.scorePreds.get(fixtureId).set(S.user.id, { home:h, away:a });
+  } else {
+    S.msg = S.msg || "Skor tahmini kaydedilemedi.";
+  }
+  render();
+}
+
 function isAdmin() { return !!S.user && S.admin; }
 
 async function saveScore(team, i) {
@@ -645,6 +696,79 @@ async function saveDisplayName() {
   render();
 }
 
+// Maç bazlı "Herkesin tahmini" paneli. Sonuç (3/1/0) dağılımı takım
+// kilitlenene kadar gizli kalır — erken açılırsa rakip kopyalayabilir. Skor
+// tahminleri bu kısıtla oynamıyor (0010_score_predictions.sql "skor tahmini
+// oku" politikası kilit öncesinde de herkese açık), bu yüzden burada hep
+// gösterilir ve panel her zaman tıklanabilir.
+function everyoneGuessPanel(k, i, m, hardLock) {
+  const pid = k + ':' + i;
+  const open = S.openMatch === pid;
+  const res = S.results[k];
+  const actualPts = res[i];
+  const votes = S.players.map(p => ({name:p.name, v:(p[k] || empty())[i]})).sort((x,y) => (y.v === null ? -1 : y.v) - (x.v === null ? -1 : x.v) || x.name.localeCompare(y.name,"tr"));
+  const cnt = v => votes.filter(x => x.v === v).length;
+  const scoreMap = m.id ? (S.scorePreds.get(m.id) || new Map()) : new Map();
+  const scoreRows = Array.from(scoreMap.entries()).map(([uid, g]) => {
+    const player = S.players.find(p => p.id === uid);
+    return { name:player ? player.name : "?", home:g.home, away:g.away };
+  }).sort((a,b) => a.name.localeCompare(b.name, "tr"));
+  const hasActual = m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null;
+
+  const summary = hardLock
+    ? ('3: ' + cnt(3) + ' · 1: ' + cnt(1) + ' · 0: ' + cnt(0))
+    : (scoreRows.length ? scoreRows.length + ' skor tahmini' : 'skor tahmini yok');
+  let html = '<button class="peek" onclick="peek(\'' + pid + '\')"><span>Herkesin tahmini</span><span>' + summary + (open ? ' ▴' : ' ▾') + '</span></button>';
+  if (open) {
+    html += '<div class="peekbody">';
+    if (hardLock) {
+      html += '<div class="dist">Sonuç tahmini</div>';
+      if (!votes.length) html += '<div class="dist">Kimse tahmin girmemiş.</div>';
+      else votes.forEach(x => {
+        const right = actualPts !== null && x.v !== null && x.v === actualPts;
+        html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv' + (right ? ' on' : '') + '">' + (x.v === null ? '·' : x.v) + '</span></div>';
+      });
+    }
+    html += '<div class="dist">Skor tahmini' + (hasActual ? ' · gerçek ' + m.homeGoals + '-' + m.awayGoals : '') + '</div>';
+    if (!scoreRows.length) html += '<div class="dist">Kimse skor tahmini girmemiş.</div>';
+    else scoreRows.forEach(x => {
+      const pts = hasActual ? scoreMatchPrediction(x.home, x.away, m.homeGoals, m.awayGoals) : null;
+      html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv wide' + (pts === 5 ? ' on' : '') + '">' + x.home + '-' + x.away + '</span></div>';
+    });
+    html += '</div>';
+  }
+  return html;
+}
+
+function scoreCardBody(T, m) {
+  if (!m.id) return '<div class="meta" style="padding:12px 16px">Skor tahmini için fikstür verisi bekleniyor.</div>';
+  const started = Date.now() >= new Date(m.iso).getTime();
+  const homeName = m.home ? T.name : m.opp;
+  const awayName = m.home ? m.opp : T.name;
+  const mine = (S.scorePreds.get(m.id) || new Map()).get(S.user.id);
+  const hasActual = m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null;
+
+  let html = '<div class="spick"><span class="steam"><b>' + esc(homeName) + '</b></span>' +
+    '<input id="sh_' + m.id + '" inputmode="numeric" maxlength="2" value="' + (mine ? mine.home : '') + '"' + (started ? ' disabled' : '') + '>' +
+    '<span class="sep">–</span>' +
+    '<input id="sa_' + m.id + '" inputmode="numeric" maxlength="2" value="' + (mine ? mine.away : '') + '"' + (started ? ' disabled' : '') + '>' +
+    '<span class="steam" style="text-align:right"><b>' + esc(awayName) + '</b></span></div><div class="spactions">';
+
+  if (hasActual && mine) {
+    const pts = scoreMatchPrediction(mine.home, mine.away, m.homeGoals, m.awayGoals);
+    const label = pts === 5 ? 'Tam skor · +5' : pts === 3 ? 'Averaj · +3' : pts === 1 ? 'Sonuç · +1' : 'Kaçtı · +0';
+    html += '<span class="chip' + (pts === 5 ? ' hit' : '') + '">' + label + '</span>';
+  } else if (hasActual) {
+    html += '<span class="chip">Gerçek skor ' + m.homeGoals + '-' + m.awayGoals + '</span>';
+  } else if (started) {
+    html += '<span class="chip">Maç başladı</span>';
+  } else {
+    html += '<button onclick="saveScorePick(\'' + m.id + '\')">Kaydet</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function teamView(k) {
   const T = TEAMS[k], picks = S.me[k] || empty();
   const hardLock = locked(k), conf = confirmedAt(S.me, k), lk = hardLock || !!conf;
@@ -653,35 +777,56 @@ function teamView(k) {
   const res = S.results[k];
   const earned = res.reduce((a,b)=>a+(b||0),0);
   const played = res.filter(x=>x!==null).length;
+  const scoreMode = S.predMode === "score";
   let html = '<div class="strip">' + (hardLock ? '<span>Tahminler kilitlendi — ' + T.matches[0].d + ' maçından 1 saat önce</span>' : '<span>' + (conf ? 'Kaydedildi · kilide kalan' : 'Kilide kalan') + '</span><b id="cd">' + (countdownText(lockAt(k))||"") + '</b>') + '</div><div class="pad">';
+
+  html += '<div class="scope"><button class="' + (!scoreMode?'on':'') + '" onclick="setPredMode(\'outcome\')">Sonuç Tahmini</button><button class="' + (scoreMode?'on':'') + '" onclick="setPredMode(\'score\')">Skor Tahmini</button></div>';
 
   T.matches.forEach((m,i) => {
     const mine = picks[i], actual = res[i];
     const hit = actual !== null && mine !== null && actual === mine;
     const miss = actual !== null && mine !== null && actual !== mine;
-    html += '<div class="card"><div class="top"><div style="display:flex;align-items:center;gap:10px;min-width:0">' + teamLogo(m.oppTeam, "sm") + '<div style="min-width:0"><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div><div class="picks">';
-    PICKS.forEach(p => {
-      const sel = mine === p.v;
-      html += '<button class="' + (sel?'sel':'') + '"' + (lk?' disabled':'') + ' onclick="pick(\'' + k + '\',' + i + ',' + p.v + ')"><span class="v">' + p.v + '</span><span class="t">' + p.t + '</span></button>';
-    });
-    html += '</div>';
-    const pid = k + ':' + i, open = S.openMatch === pid;
-    if (hardLock) {
-      const votes = S.players.map(p => ({name:p.name, v:(p[k] || empty())[i]})).sort((x,y) => (y.v === null ? -1 : y.v) - (x.v === null ? -1 : x.v) || x.name.localeCompare(y.name,"tr"));
-      const cnt = v => votes.filter(x => x.v === v).length;
-      html += '<button class="peek" onclick="peek(\'' + pid + '\')"><span>Herkesin tahmini</span><span>3: ' + cnt(3) + ' · 1: ' + cnt(1) + ' · 0: ' + cnt(0) + (open ? ' ▴' : ' ▾') + '</span></button>';
-      if (open) {
-        html += '<div class="peekbody">';
-        if (!votes.length) html += '<div class="dist">Kimse tahmin girmemiş.</div>';
-        votes.forEach(x => { const right = actual !== null && x.v !== null && x.v === actual; html += '<div class="prow"><span class="pn">' + esc(x.name) + '</span><span class="pv' + (right ? ' on' : '') + '">' + (x.v === null ? '·' : x.v) + '</span></div>'; });
-        html += '</div>';
-      }
-    } else html += '<div class="peek"><span>Herkesin tahmini</span><span>kilitten sonra açılır</span></div>';
+    html += '<div class="card"><div class="top"><div style="display:flex;align-items:center;gap:10px;min-width:0">' + teamLogo(m.oppTeam, "sm") + '<div style="min-width:0"><div class="opp">' + esc(m.opp) + '</div><div class="meta">' + m.d + ' · ' + (m.home ? "İç saha" : "Deplasman") + '</div></div></div>' + (actual !== null ? '<span class="chip' + (hit ? ' hit' : '') + '">' + (hit ? "Tuttu" : miss ? "Kaçtı" : "Sonuç " + actual) + '</span>' : '') + '</div>';
+    if (scoreMode) {
+      html += scoreCardBody(T, m);
+    } else {
+      html += '<div class="picks">';
+      PICKS.forEach(p => {
+        const sel = mine === p.v;
+        html += '<button class="' + (sel?'sel':'') + '"' + (lk?' disabled':'') + ' onclick="pick(\'' + k + '\',' + i + ',' + p.v + ')"><span class="v">' + p.v + '</span><span class="t">' + p.t + '</span></button>';
+      });
+      html += '</div>';
+    }
+    html += everyoneGuessPanel(k, i, m, hardLock);
     html += '</div>';
   });
 
-  html += '</div><div class="bar"><div class="in"><div><div class="k">' + T.tla + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
+  html += '</div>';
+  if (!scoreMode) {
+    html += '<div class="bar"><div class="in"><div><div class="k">' + T.tla + ' tahmin toplamın</div><div class="s">' + filled + '/8 maç işaretlendi' + (played ? ' · gerçekleşen ' + earned + ' puan (' + played + ' maç)' : '') + '</div></div><div class="tot">' + predicted + '</div></div><div class="act">' + (hardLock ? '<div class="shut">Tahminler kesinleşti, değiştirilemez.</div>' : conf ? '<button class="edit" onclick="editTeam(\'' + k + '\')">Düzenle</button>' : '<button class="save"' + (filled < 8 ? ' disabled' : '') + ' onclick="confirmTeam(\'' + k + '\')">' + (filled < 8 ? '8 maçın hepsini işaretle' : 'Kaydet ve kilitle') + '</button>') + '</div></div>';
+  }
   return html;
+}
+
+// Skor tahmini sıralaması ana sıralamadan bağımsız: gs/fb kapsamı ayrımı
+// yok, sonuçlanmış (fixtures.home_goals/away_goals dolu) her iki takımın
+// maçı da tek havuzda toplanıyor.
+function scoreStandingsRows() {
+  const finishedMatches = [].concat(TEAMS.gs.matches || [], TEAMS.fb.matches || [])
+    .filter(m => m.id && m.homeGoals !== undefined && m.homeGoals !== null && m.awayGoals !== undefined && m.awayGoals !== null);
+  const rows = (S.players || []).map(p => {
+    let points = 0, exact = 0, diff = 0;
+    finishedMatches.forEach(m => {
+      const guess = S.scorePreds.get(m.id)?.get(p.id);
+      const pts = guess ? scoreMatchPrediction(guess.home, guess.away, m.homeGoals, m.awayGoals) : 0;
+      if (pts === 5) exact++;
+      else if (pts === 3) diff++;
+      points += pts || 0;
+    });
+    return Object.assign({}, p, { points, exact, diff });
+  });
+  rows.sort(compareScorePredictionRows);
+  return { rows, played:finishedMatches.length };
 }
 
 function boardView() {
@@ -721,6 +866,17 @@ function boardView() {
     html += '<div class="rowhead" style="margin-top:26px"><h2 class="sec">En çok maç bilen</h2></div><p class="meta" style="margin:-4px 0 12px">Yan sıralama. Kazananı belirlemez, maçları en iyi okuyanı gösterir.</p>';
     byHits.forEach((p,i) => { const mine = S.me && p.id === S.me.id; html += '<div class="hrow' + (mine ? ' me' : '') + '"><span class="pos' + (i===0 ? ' first' : '') + '">' + (i+1) + '</span><span class="hn">' + esc(p.name) + (mine ? ' (sen)' : '') + '</span><span class="hv">' + p.hits + '<small>/' + st.played + '</small></span></div>'; });
     html += '<div style="height:12px"></div>';
+  }
+
+  const sst = scoreStandingsRows();
+  html += '<div class="rowhead" style="margin-top:26px"><h2 class="sec">Skor Tahmini Sıralaması</h2></div><p class="meta" style="margin:-4px 0 12px">' + (sst.played ? 'Tam skoru bilen en çok puanı alır. Eşitlikte tam skor sayısı, sonra doğru averaj sayısı belirleyici.' : 'Sonuçlanan maç olunca burada sıralama oluşacak.') + '</p>';
+  if (!sst.played || !sst.rows.length) html += '<p class="meta" style="margin-bottom:24px">Henüz veri yok.</p>';
+  else {
+    sst.rows.forEach((p,i) => {
+      const mine = S.me && p.id === S.me.id;
+      html += '<div class="srow' + (mine?' me':'') + '"><span class="pos' + (i===0?' first':'') + '">' + (i+1) + '</span><span class="sn">' + esc(p.name) + (mine?' (sen)':'') + '</span><span class="sv">' + p.points + '<small>puan</small></span><span class="sv">' + p.exact + '<small>tam skor</small></span></div>';
+    });
+    html += '<div style="height:20px"></div>';
   }
 
   html += '<div class="rowhead"><h2 class="sec">Maç sonuçları</h2>' + (admin ? '<button class="ghost" onclick="toggleEdit()">' + (S.editing ? 'Girişi kapat' : 'Sonuç gir') + '</button>' : '') + '</div>' + (admin && S.editing ? '<button class="wipe" onclick="clearAllScores()">Bütün skorları sil</button>' : '') + '<p class="meta" style="margin:0 0 16px">' + (admin ? 'Maçın yanındaki Gir düğmesine bas, skoru yaz. Puan otomatik hesaplanır.' : 'Skorları yalnızca yarışma yöneticisi giriyor.') + '</p>';
@@ -770,6 +926,7 @@ Object.assign(window, {
   S, render, go, setAuthMode, signUp, signIn, signInWithGoogle, requestPasswordReset, updatePassword, signOut,
   saveDisplayName, locked,
   pick, confirmTeam, editTeam, saveScore, clearAllScores, clearAll, clearScore, setPt,
+  setPredMode, saveScorePick,
   openRow, closeRow, setScope, peek, toggleEdit, refresh,
   toggleAccountMenu, closeAccountMenu, openLegacyClaim,
   teamLogoFallback
