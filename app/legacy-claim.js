@@ -45,11 +45,6 @@ if (!configured) {
     }
   }
 
-  function offerDismissed() {
-    const key = userKey("offer_dismissed");
-    return key ? localStorage.getItem(key) === "1" : false;
-  }
-
   function alreadyMigrated() {
     const key = userKey("migrated");
     return key ? localStorage.getItem(key) === "1" : false;
@@ -67,47 +62,6 @@ if (!configured) {
   function eligibleForOffer() {
     const s = state();
     return !!s?.user && !!s?.me && !legacyScreenOpen && !alreadyMigrated() && anyTeamOpen();
-  }
-
-  function injectOffer() {
-    if (!eligibleForOffer()) return;
-    const app = document.getElementById("app");
-    if (!app) return;
-    const nav = app.querySelector(".wrap > nav");
-    if (!nav || app.querySelector("#legacy-account-offer") || app.querySelector("#legacy-account-link")) return;
-
-    if (offerDismissed()) {
-      // Kart kapatıldı ama taşıma hâlâ mümkün: küçük bir giriş noktası bırak.
-      const wrap = document.createElement("div");
-      wrap.id = "legacy-account-link";
-      wrap.style.margin = "12px 20px 0";
-      wrap.innerHTML = '<button class="ghost">Eski PIN hesabını taşı</button>';
-      wrap.querySelector("button")?.addEventListener("click", openClaimScreen);
-      nav.insertAdjacentElement("afterend", wrap);
-      return;
-    }
-
-    const card = document.createElement("div");
-    card.id = "legacy-account-offer";
-    card.className = "info";
-    card.style.margin = "16px 20px 0";
-    card.innerHTML = `
-      <b>Eski PIN hesabın var mı?</b>
-      Önceki sürümde tahmin girdiysen eski kullanıcı adın ve 6 haneli PIN'inle
-      tahminlerini bu yeni hesaba tek seferde taşıyabilirsin.
-      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-        <button class="ghost" id="legacy-claim-open">Tahminleri taşı</button>
-        <button class="ghost" id="legacy-claim-dismiss">Bende yok</button>
-      </div>`;
-    nav.insertAdjacentElement("afterend", card);
-
-    card.querySelector("#legacy-claim-open")?.addEventListener("click", openClaimScreen);
-    card.querySelector("#legacy-claim-dismiss")?.addEventListener("click", () => {
-      const key = userKey("offer_dismissed");
-      if (key) localStorage.setItem(key, "1");
-      card.remove();
-      queueMicrotask(injectOffer);
-    });
   }
 
   function renderMessage(text) {
@@ -163,7 +117,6 @@ if (!configured) {
     legacyScreenOpen = false;
     if (state()) state().legacyClaimOpen = false;
     window.render?.();
-    queueMicrotask(injectOffer);
   }
 
   async function legacyPinHash(name, pin) {
@@ -234,17 +187,6 @@ if (!configured) {
     }
   }
 
-  function boot() {
-    const app = document.getElementById("app");
-    if (!app) return;
-    const observer = new MutationObserver(() => queueMicrotask(injectOffer));
-    observer.observe(app, { childList:true, subtree:false });
-    injectOffer();
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot, { once:true });
-  } else {
-    boot();
-  }
+  window.openLegacyClaimScreen = openClaimScreen;
+  window.legacyClaimEligible = eligibleForOffer;
 }
