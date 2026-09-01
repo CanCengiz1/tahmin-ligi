@@ -41,6 +41,48 @@ export function revealedTeams(mine, isLocked, teamKeys) {
  * opts.revealed: kilit sonrası tahminlerin herkese açık gösterilip gösterilmeyeceği
  *   (saat/fikstür bilgisine bağlı, bu modülün dışında hesaplanır)
  */
+/*
+ * Skor tahmini puanlaması — takımın 8 maçlık puan tahmininden (3/1/0)
+ * bağımsız, ayrı bir kural. Şu an yalnızca bu saf fonksiyon var; veri modeli
+ * ve arayüz sonraki adım. Bkz. docs/DOMAIN.md "Skor tahmini puanlaması".
+ */
+function matchOutcome(home, away) {
+  if (home > away) return "home";
+  if (home < away) return "away";
+  return "draw";
+}
+
+export function scoreMatchPrediction(predictedHome, predictedAway, actualHome, actualAway) {
+  if (actualHome === null || actualHome === undefined || actualAway === null || actualAway === undefined) {
+    return null;
+  }
+  if (predictedHome === actualHome && predictedAway === actualAway) return 5;
+
+  const predictedResult = matchOutcome(predictedHome, predictedAway);
+  const actualResult = matchOutcome(actualHome, actualAway);
+  if (predictedResult !== actualResult) return 0;
+
+  // Beraberliğin averajı her zaman 0'dır. Tam skor değilse (yukarıda elendi),
+  // beraberlik tahmini averaj testini geçse bile 3 alamaz — yalnızca isabet
+  // puanı (1) alır. Aksi hâlde beraberlik tahmin etmek galibiyet tahmin
+  // etmekten sistematik olarak daha kazançlı olurdu.
+  const correctDiff = predictedResult !== "draw" && (predictedHome - predictedAway) === (actualHome - actualAway);
+  return correctDiff ? 3 : 1;
+}
+
+/*
+ * Skor tahmini sıralaması için eşitlik bozucu sırası: toplam puan, sonra
+ * tam skor sayısı, sonra doğru averaj sayısı (tam skorlar hariç — bunlar
+ * scoreMatchPrediction'da zaten ayrı, üstün bir kademe). Hepsi eşitse eşit
+ * sıra (0) — burada daha ileri bir kıstas uygulanmaz.
+ */
+export function compareScorePredictionRows(a, b) {
+  if (b.points !== a.points) return b.points - a.points;
+  if (b.exact !== a.exact) return b.exact - a.exact;
+  if (b.diff !== a.diff) return b.diff - a.diff;
+  return 0;
+}
+
 export function standings(players, results, scope, opts) {
   opts = opts || {};
   scope = (scope === "gs" || scope === "fb") ? scope : "gs";

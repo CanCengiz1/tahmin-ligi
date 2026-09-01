@@ -173,6 +173,50 @@ kalkarsan bu maçta çakışırsın.
 
 ---
 
+## Skor tahmini puanlaması
+
+Takımın 8 maçlık puan tahmininden (3/1/0, yukarıdaki `predictions.points`)
+tamamen ayrı, bağımsız bir özellik: burada "GS kaç puan toplar" değil, "bu
+maç kaç kaç biter" tahmin ediliyor. **Şu an yalnızca kural var** —
+`app/scoring.js` içindeki `scoreMatchPrediction()` ve
+`compareScorePredictionRows()` saf fonksiyonları ve testleri
+(`app/scoring.test.js`). Veri modeli (tahminlerin nerede tutulacağı,
+`fixtures.home_goals`/`away_goals`'a nasıl bağlanacağı) ve arayüz henüz yok —
+bu belge yalnızca puanlama kuralını bağlayıcı olarak sabitliyor.
+
+### Kural
+
+Bir maç için tahmin edilen skor (`predictedHome`, `predictedAway`) gerçek
+skorla (`actualHome`, `actualAway`) karşılaştırılır:
+
+| Durum | Puan |
+|---|---|
+| Tam skor tutar | 5 |
+| Sonuç (ev/deplasman/beraberlik) ve averaj doğru, ama tam skor değil | 3 |
+| Yalnızca sonuç doğru | 1 |
+| Sonuç yanlış | 0 |
+| Gerçek skor henüz girilmedi | `null` |
+
+**Beraberlik yalnızca tam skorla 3'ü geçebilir, aksi hâlde en fazla 1 alır.**
+Beraberliğin averajı matematiksel olarak her zaman 0'dır — 1-1 tahmin edip
+2-2 görmek de "doğru sonuç + doğru averaj" testini teknik olarak geçer. Bunu
+3 puanla ödüllendirmek, beraberlik tahmin etmeyi galibiyet tahmin etmekten
+sistematik olarak daha kazançlı hale getirir (galibiyet tahmininde averajı
+tutturmak gerçek bir isabet gerektirir, beraberlikte otomatik gelir). Kural
+bu yüzden beraberliği bilerek 3'lük kademenin dışında tutuyor: tam skor
+tutmadıkça beraberlik tahmini en fazla 1 puan eder.
+
+### Sıralama eşitlik bozucu
+
+`compareScorePredictionRows(a, b)` iki satırı şu sırayla karşılaştırır:
+toplam puan, sonra tam skor sayısı, sonra (tam skorlar hariç) doğru averaj
+sayısı, hepsi eşitse eşit sıra. Ana puan-tahmini sıralamasındaki
+"tahminini önce kesinleştiren önde" kuralı (bkz. `standings()`,
+`app/scoring.js`) burada yok — iki sıralama kasıtlı olarak ayrı, biri
+diğerine dokunmadan değişebilir.
+
+---
+
 ## Kilit
 
 Kilit anı türetilir, ayrı tabloda tutulmaz:
